@@ -91,6 +91,14 @@ func RecordCandidateDetection(ctx context.Context, db *database.DB, c Vulnerabil
 	if err != nil {
 		return "", err
 	}
+	// Candidate identity is authoritative. If this observation matched an
+	// existing fingerprint (for example host case or an explicit default port),
+	// project the original actionable URL instead of creating a second UI row
+	// from the latest spelling of the same endpoint.
+	c, err = loadCandidateForResult(ctx, db, id)
+	if err != nil {
+		return id, err
+	}
 	state := candidateState(ctx, db, id)
 	// A new observation may legitimately re-open a previous negative/unknown
 	// result. CONFIRMED is sticky and is never downgraded by detector traffic.
@@ -197,6 +205,9 @@ func RecordCandidateResult(ctx context.Context, db *database.DB, c Vulnerability
 			WHERE id=?`, result.Confidence, c.Payload, c.Payload, result.Evidence, RedactText(result.Evidence), id)
 	} else {
 		id, err = StoreCandidateE(ctx, db, c)
+		if err == nil {
+			c, err = loadCandidateForResult(ctx, db, id)
+		}
 	}
 	if err != nil {
 		return "", err
@@ -282,11 +293,6 @@ func reopenCandidate(ctx context.Context, db *database.DB, id, actor, method, re
 }
 
 func upsertFindingProjection(ctx context.Context, db *database.DB, candidateID string, c VulnerabilityCandidate, result VerifyResult, lifecycle string, meta FindingMeta) error {
-	// Normalize the URL BEFORE the UNIQUE(target_id,type,url,parameter) insert
-	// so https://www.x.com:443/a and https://x.com/a hit the same row instead
-	// of showing as two Needs Review rows for the same file. Raw evidence stays
-	// untouched; only the identity column is canonical.
-	c.URL = NormalizeURL(c.URL)
 	status := ""
 	switch lifecycle {
 	case CandConfirmed, CandVerified:

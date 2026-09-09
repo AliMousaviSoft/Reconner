@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
@@ -38,39 +39,38 @@ type CanonResponse struct {
 
 var reNumSegments = regexp.MustCompile(`/\d+`)
 
-// NormalizeURL produces a stable template for a URL: lower-cased scheme/host,
-// default ports stripped (:443/https, :80/http), a single leading www. folded,
-// numeric path segments collapsed to {id}, query keys sorted lower-cased (values
-// dropped), fragments dropped and trailing-slash noise removed. This lets us
-// recognize that https://www.x.com:443/api/orders/1 and
-// https://x.com/api/orders/2 are the SAME endpoint, so Needs Review doesn't
-// list them as separate rows.
+// NormalizeURL produces a stable endpoint template: scheme and hostname are
+// case-folded, default ports and fragments are removed, numeric path segments
+// collapse to {id}, and sorted query names are retained without their values.
+//
+// Semantic origin/path distinctions are intentionally preserved. In
+// particular, www and apex hosts, query-name case, non-default ports, and a
+// trailing slash may route to different applications or handlers and must not
+// be merged without response/redirect evidence.
 func NormalizeURL(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
 		return raw
 	}
 	scheme := strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Host)
+	hostName := strings.ToLower(u.Hostname())
+	port := u.Port()
 	// Strip only the DEFAULT port for the known scheme, so
 	// https://x.com:443 == https://x.com but https://x.com:8443 stays distinct
 	// (and http://x.com:443 keeps its explicit port).
-	if scheme == "https" {
-		host = strings.TrimSuffix(host, ":443")
-	} else if scheme == "http" {
-		host = strings.TrimSuffix(host, ":80")
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
 	}
-	// Fold a single leading www. — www and apex almost always serve the same
-	// app, and keeping them distinct doubles Needs Review rows for the same file.
-	// Deeper subdomains (api., app.) are left alone.
-	host = strings.TrimPrefix(host, "www.")
+	host := hostName
+	if port != "" {
+		host = net.JoinHostPort(hostName, port)
+	} else if strings.Contains(hostName, ":") {
+		host = "[" + hostName + "]"
+	}
 	path := reNumSegments.ReplaceAllString(u.Path, "/{id}")
-	if len(path) > 1 {
-		path = strings.TrimSuffix(path, "/")
-	}
 	keys := make([]string, 0, len(u.Query()))
 	for k := range u.Query() {
-		keys = append(keys, strings.ToLower(k))
+		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	norm := scheme + "://" + host + path

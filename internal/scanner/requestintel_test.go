@@ -17,13 +17,11 @@ func TestNormalizeURL(t *testing.T) {
 }
 
 func TestNormalizeURLHostNormalization(t *testing.T) {
-	// Same file served via www + explicit :443 must fold to one key,
-	// otherwise Needs Review lists them as separate rows.
+	// Transport-equivalent spellings fold to one endpoint key.
 	groups := [][]string{
 		{
-			"https://www.example.com:443/js/app.js",
-			"https://example.com/js/app.js",
-			"https://WWW.EXAMPLE.COM/js/app.js",
+			"https://WWW.EXAMPLE.COM:443/js/app.js?q=1#first",
+			"https://www.example.com/js/app.js?q=2#second",
 		},
 		{ // default ports stripped per scheme
 			"https://example.com:443/a?q=1",
@@ -33,10 +31,9 @@ func TestNormalizeURLHostNormalization(t *testing.T) {
 			"http://example.com:80/a",
 			"http://example.com/a",
 		},
-		{ // fragment + trailing slash noise
+		{ // fragments are client-side only and never reach the server
 			"https://example.com/a#section",
 			"https://example.com/a",
-			"https://example.com/a/",
 		},
 	}
 	for i, g := range groups {
@@ -48,8 +45,12 @@ func TestNormalizeURLHostNormalization(t *testing.T) {
 		}
 	}
 
-	// Must stay distinct: non-default port, different subdomain, different scheme.
+	// Must stay distinct unless equivalence is established from actual response
+	// evidence: www/apex, trailing slash and query-name case can route differently.
 	distinct := [][2]string{
+		{"https://www.example.com/a", "https://example.com/a"},
+		{"https://example.com/a/", "https://example.com/a"},
+		{"https://example.com/a?User=1", "https://example.com/a?user=1"},
 		{"https://example.com:8443/a", "https://example.com/a"},
 		{"https://api.example.com/a", "https://example.com/a"},
 		{"http://example.com/a", "https://example.com/a"},
