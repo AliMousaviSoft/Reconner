@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -577,6 +578,47 @@ func (s *Scheduler) CreateTaskTyped(targetID string, modules []string, priority 
 	return s.createTask(targetID, modules, priority, typeTag, "")
 }
 
+var ErrInvalidModuleSelection = errors.New("invalid module selection")
+
+// normalizeRequestedModules makes the scheduler boundary authoritative. The UI
+// offers only supported modules, but API clients and stale frontends must not be
+// able to create a successful-looking task containing misspelled or retired
+// no-op phases. Duplicate selections are collapsed without changing click order.
+func normalizeRequestedModules(modules []string) ([]string, error) {
+	if len(modules) == 0 {
+		return nil, fmt.Errorf("%w: select at least one module", ErrInvalidModuleSelection)
+	}
+	known := make(map[string]bool, len(AllModules)+12)
+	for _, module := range AllModules {
+		known[module] = true
+	}
+	for _, token := range []string{
+		"speed_slow", "speed_normal", "speed_fast", "no_subdomain_brute",
+		"asn_discovery", "no_asn_discovery", "single_endpoint",
+		ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
+		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
+		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports",
+	} {
+		known[token] = true
+	}
+	seen := make(map[string]bool, len(modules))
+	out := make([]string, 0, len(modules))
+	for _, raw := range modules {
+		module := strings.TrimSpace(raw)
+		if module == ModuleDOMXSS || module == ModulePortScan {
+			return nil, fmt.Errorf("%w: module %q is retired", ErrInvalidModuleSelection, module)
+		}
+		if !known[module] {
+			return nil, fmt.Errorf("%w: unsupported module %q", ErrInvalidModuleSelection, module)
+		}
+		if !seen[module] {
+			seen[module] = true
+			out = append(out, module)
+		}
+	}
+	return out, nil
+}
+
 func (s *Scheduler) createTask(targetID string, modules []string, priority int, typeTag, scopeOverride string) (*models.Task, error) {
 	// Hold admission read-locked through persistence/enqueue so graceful shutdown
 	// cannot begin between the stopping check and creation of a new pending row.
@@ -586,8 +628,10 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 		return nil, fmt.Errorf("scheduler is stopping")
 	}
 	defer s.mu.RUnlock()
-	if len(modules) == 0 {
-		modules = AllModules
+	var err error
+	modules, err = normalizeRequestedModules(modules)
+	if err != nil {
+		return nil, err
 	}
 
 	// Capability planning: a selection of vulnerability OBJECTIVES is expanded into
@@ -626,7 +670,7 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 	}
 
 	modulesJSON := models.StringSliceToJSON(modules)
-	_, err := s.db.Exec(`
+	_, err = s.db.Exec(`
 		INSERT INTO tasks (id, target_id, type, status, priority, modules, total, scope_override)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, task.ID, task.TargetID, task.Type, task.Status, task.Priority, modulesJSON, task.Total, scopeOverride)
@@ -861,24 +905,30 @@ func (s *Scheduler) SkipCurrentPhase(targetID string) error {
 	return nil
 }
 
-// beginPhase registers a cancelable child context for the task's current phase so
-// SkipCurrentPhase can abort just this phase. The returned finish() cancels the
-// child, tears down the registration, and reports whether the phase ended because
-// the operator SKIPPED it (as opposed to the whole task being cancelled).
-func (s *Scheduler) beginPhase(parent context.Context, taskID string) (context.Context, func() bool) {
-	modCtx, cancel := context.WithCancel(parent)
+// beginPhase registers a time-bounded child context for the task's current phase
+// so SkipCurrentPhase can abort just this phase and a wedged module cannot hold a
+// scheduler slot forever. The timeout is deliberately PER PHASE: resetting it
+// whenever the scan advances prevents a healthy multi-module scan from being
+// killed merely because its combined wall-clock runtime crossed the watchdog.
+// finish tears down the registration and separately reports an operator skip and
+// a watchdog timeout.
+func (s *Scheduler) beginPhase(parent context.Context, taskID string, watchdog time.Duration) (context.Context, func() (skipped, timedOut bool)) {
+	modCtx, cancel := context.WithTimeout(parent, watchdog)
 	s.pauseMu.Lock()
 	s.skipCancel[taskID] = cancel
 	s.skipReq[taskID] = false
 	s.pauseMu.Unlock()
-	finish := func() bool {
+	finish := func() (bool, bool) {
+		// Capture the cause before cancel changes a still-live context to
+		// context.Canceled.
+		timedOut := modCtx.Err() == context.DeadlineExceeded
 		cancel()
 		s.pauseMu.Lock()
 		skipped := s.skipReq[taskID]
 		delete(s.skipCancel, taskID)
 		delete(s.skipReq, taskID)
 		s.pauseMu.Unlock()
-		return skipped && parent.Err() == nil
+		return skipped && parent.Err() == nil, timedOut && parent.Err() == nil
 	}
 	return modCtx, finish
 }
@@ -1083,12 +1133,11 @@ func (s *Scheduler) tryStartTask(taskID string) {
 	}()
 }
 
-// baseScanWatchdog is the FLOOR of the per-scan watchdog — not the whole
-// story, see effectiveWatchdog. A module that hangs while ignoring context
-// cancellation would otherwise hold its concurrency slot forever, permanently
-// lowering capacity until nothing new can start (a cause of scans stuck in
-// 'pending'). The watchdog guarantees the slot is always freed — it exists to
-// catch a WEDGED module, not to cut off a big-but-healthy scan early.
+// baseScanWatchdog is the FLOOR of the per-phase watchdog — not the whole
+// story, see effectiveWatchdog. A module that hangs would otherwise hold its
+// concurrency slot forever, permanently lowering capacity until nothing new can
+// start (a cause of scans stuck in 'pending'). The watchdog exists to catch a
+// WEDGED phase, not to cap the combined runtime of a healthy scan.
 func baseScanWatchdog(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.ScanWatchdogHours > 0 {
 		return time.Duration(cfg.ScanWatchdogHours) * time.Hour
@@ -1097,7 +1146,7 @@ func baseScanWatchdog(cfg *config.Config) time.Duration {
 }
 
 // effectiveWatchdog adds adaptive headroom on top of the base floor for
-// targets already KNOWN to be large (from a prior scan's subdomain count) —
+// targets known to be large at the start of the CURRENT phase —
 // a bug-bounty domain with tens of thousands of subdomains genuinely needs
 // more wall-clock time to crawl/probe/fuzz than a 5-host target, and a flat
 // ceiling applied identically to both was exactly the reported bug. Capped at
@@ -1118,6 +1167,21 @@ func effectiveWatchdog(cfg *config.Config, knownSubdomains int) time.Duration {
 	return d
 }
 
+// currentSubdomainCount reads the live discovery table instead of relying only
+// on targets.subdomain_count, whose cached value can lag behind enumeration.
+// Keeping the previous count on a transient DB error avoids accidentally
+// shrinking the next phase's watchdog.
+func (s *Scheduler) currentSubdomainCount(targetID string, previous int) int {
+	var current int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE target_id = ?`, targetID).Scan(&current); err != nil {
+		return previous
+	}
+	if current < previous {
+		return previous
+	}
+	return current
+}
+
 func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var targetID, modulesJSON, taskStatus, kind, taskType, scopeOverride string
 	var target struct{ Domain string }
@@ -1134,13 +1198,10 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		return
 	}
 
-	// Watchdog: bound every scan so a wedged module can never hold its slot
-	// forever, but scale the bound to what's already known about the target's
-	// size. On timeout ctx is cancelled → the scan ends and the slot is
-	// released by tryStartTask's defer.
-	watchdog := effectiveWatchdog(s.cfg, knownSubdomains)
-	ctx, cancelWatchdog := context.WithTimeout(parentCtx, watchdog)
-	defer cancelWatchdog()
+	// The task context carries operator/shutdown cancellation. A separate
+	// watchdog is attached to each phase below, so forward progress resets the
+	// clock instead of a fixed deadline terminating a healthy long scan.
+	ctx := parentCtx
 	// The task may have been cancelled (e.g. target deletion) after it was
 	// queued but before it started — don't run it.
 	if taskStatus == "cancelled" {
@@ -1225,6 +1286,14 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	}
 	if len(scopeHosts) > 0 {
 		ctx = scanner.WithHostScope(ctx, scopeHosts)
+	}
+	// Parameter/archive collectors accept one root domain at a time. Keep an
+	// explicit root list so a project containing unrelated domains does not run
+	// those collectors only for the first asset while every later detector sees a
+	// mysteriously incomplete input table.
+	webRoots := normalizeSubdomainRoots(scopeHosts)
+	if len(webRoots) == 0 {
+		webRoots = normalizeSubdomainRoots([]string{webPrimary})
 	}
 	sentModules := models.JSONToStringSlice(modulesJSON)
 	var modules []string
@@ -1323,9 +1392,14 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		})
 	}
 	runPlannedModule := func(moduleCtx context.Context, module string) error {
-		if module == ModuleSubdomainEnum {
+		switch module {
+		case ModuleSubdomainEnum:
 			return runSubdomainRootFanout(moduleCtx, subdomainRoots, logFn, func(root string) error {
 				return s.runModule(moduleCtx, module, targetID, root, logFn)
+			})
+		case ModuleParamDiscovery, ModuleTimeMachine:
+			return runWebRootFanout(moduleCtx, module, webRoots, logFn, func(rootCtx context.Context, root string) error {
+				return s.runModule(rootCtx, module, targetID, root, logFn)
 			})
 		}
 		return s.runModule(moduleCtx, module, targetID, domainFor(module), logFn)
@@ -1425,20 +1499,25 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 
 		s.checkMemoryPressure(taskID, logFn)
 
-		// Register a per-phase cancelable context so the operator can SKIP just this
-		// phase (SkipCurrentPhase) without cancelling the whole scan.
-		modCtx, finishPhase := s.beginPhase(ctx, taskID)
+		// Re-read live discovery growth before each phase. This fixes first-pass
+		// scans where the target started with zero known subdomains but enumeration
+		// discovered thousands: later phases now receive the same adaptive headroom
+		// as a repeat scan.
+		knownSubdomains = s.currentSubdomainCount(targetID, knownSubdomains)
+		watchdog := effectiveWatchdog(s.cfg, knownSubdomains)
+
+		// Register a per-phase context so the operator can SKIP just this phase and
+		// only a phase that stops making forward progress can exhaust the watchdog.
+		modCtx, finishPhase := s.beginPhase(ctx, taskID, watchdog)
 
 		// Parallel fast-path: run all not-yet-handled modules in the SAME group
 		// concurrently. Grouping by id keeps group 1 (recon) and group 2
 		// (injection) from ever mixing, so dependencies hold.
 		if gid := parallelGroup[module]; s.cfg.Limits.ParallelModules && gid > 0 {
 			var group []string
-			for j := i; j < len(modules); j++ {
-				if parallelGroup[modules[j]] == gid && !handled[j] {
-					group = append(group, modules[j])
-					handled[j] = true
-				}
+			for _, j := range parallelPhaseIndices(modules, i, parallelGroup, handled) {
+				group = append(group, modules[j])
+				handled[j] = true
 			}
 			if len(group) > 1 {
 				logFn("info", "scheduler", fmt.Sprintf("Running %d modules in parallel: %v", len(group), group))
@@ -1462,17 +1541,30 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 					}(gm)
 				}
 				wg.Wait()
-				if finishPhase() {
+				skipped, timedOut := finishPhase()
+				if skipped {
 					logFn("warn", "scheduler", fmt.Sprintf("Phase group %v SKIPPED by operator — continuing to next phase.", group))
 				}
 				persistCompleted()
 				s.updateTargetStats(targetID)
+				if timedOut {
+					taskErr = fmt.Errorf("phase group %v exceeded its %s watchdog and was stopped; completed results were saved", group, watchdog)
+					logFn("error", "scheduler", taskErr.Error())
+					break
+				}
 				continue
 			}
 		}
 
 		err := runPlannedModule(modCtx, module)
-		if finishPhase() {
+		skipped, timedOut := finishPhase()
+		if timedOut {
+			taskErr = fmt.Errorf("phase %q exceeded its %s watchdog and was stopped; completed results were saved", module, watchdog)
+			logFn("error", "scheduler", taskErr.Error())
+			s.updateTargetStats(targetID)
+			break
+		}
+		if skipped {
 			// Operator skipped this phase: mark it handled (so a resume doesn't
 			// redo it) and move on WITHOUT recording a task error.
 			logFn("warn", "scheduler", fmt.Sprintf("Phase %q SKIPPED by operator — continuing to next phase.", module))
@@ -1502,15 +1594,6 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	finalError := ""
 	if ctx.Err() != nil {
 		finalStatus = "cancelled"
-		// Distinguish a watchdog timeout from a user cancel.
-		if parentCtx.Err() == nil && ctx.Err() == context.DeadlineExceeded {
-			finalStatus = "failed"
-			finalError = fmt.Sprintf(
-				"scan exceeded its %s watchdog and was stopped — results found before the cutoff are already saved (nothing was rolled back). "+
-					"For a large target, raise scan_watchdog_hours in config.json (currently %s base) and re-run; the watchdog also auto-extends for targets with a large known subdomain count.",
-				watchdog, baseScanWatchdog(s.cfg))
-			logFn("error", "scheduler", finalError)
-		}
 	} else if taskErr != nil {
 		finalStatus = "failed"
 		finalError = taskErr.Error()
@@ -1719,6 +1802,36 @@ func runSubdomainRootFanout(ctx context.Context, roots []string, logFn scanner.L
 			logFn("error", ModuleSubdomainEnum, fmt.Sprintf("Asset %s failed: %v; continuing with remaining assets", root, err))
 			if firstErr == nil {
 				firstErr = fmt.Errorf("subdomain enumeration for %s: %w", root, err)
+			}
+		}
+	}
+	return firstErr
+}
+
+// runWebRootFanout executes collectors whose external tools accept exactly one
+// root domain. Each call receives a narrowed host scope, preventing URLs from a
+// sibling project asset from being attributed to the current root while still
+// allowing that root's discovered subdomains. Errors are isolated per asset so
+// one archive/provider failure cannot silently skip the rest of a domain list.
+func runWebRootFanout(ctx context.Context, module string, roots []string, logFn scanner.LogFunc, run func(context.Context, string) error) error {
+	if len(roots) == 0 {
+		logFn("warn", module, "No web domain assets are eligible for this phase.")
+		return nil
+	}
+	if len(roots) > 1 {
+		logFn("info", module, fmt.Sprintf("Multi-asset fan-out: running %s for all %d web roots.", module, len(roots)))
+	}
+	var firstErr error
+	for i, root := range roots {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		logFn("info", module, fmt.Sprintf("Asset %d/%d: %s", i+1, len(roots), root))
+		rootCtx := scanner.WithHostScope(ctx, []string{root})
+		if err := run(rootCtx, root); err != nil {
+			logFn("error", module, fmt.Sprintf("Asset %s failed: %v; continuing with remaining assets", root, err))
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s for %s: %w", module, root, err)
 			}
 		}
 	}

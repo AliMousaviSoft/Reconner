@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -1317,8 +1318,8 @@ func (h *Handler) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		req.Modules = scheduler.AllModules
-		req.Priority = 5
+		h.writeError(w, http.StatusBadRequest, "invalid scan request")
+		return
 	}
 
 	if req.Priority == 0 {
@@ -1332,6 +1333,10 @@ func (h *Handler) handleStartScan(w http.ResponseWriter, r *http.Request) {
 
 	task, err := h.sched.CreateTask(id, req.Modules, req.Priority)
 	if err != nil {
+		if errors.Is(err, scheduler.ErrInvalidModuleSelection) {
+			h.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, "failed to create task")
 		return
 	}

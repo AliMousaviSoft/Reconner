@@ -505,16 +505,12 @@ func loadXSSInsertionPoints(ctx context.Context, db *database.DB, targetID strin
 	if limit <= 0 {
 		limit = 1000000
 	}
-	pool := limit
-	if pool < 10000 {
-		pool = 10000
-	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT url,parameter,COALESCE(value,''),COALESCE(method,'GET'),COALESCE(content_type,''),COALESCE(location,'query'),COALESCE(is_reflected,0)
 		FROM parameters WHERE target_id=?
 		ORDER BY COALESCE(is_reflected,0) DESC,
 			CASE WHEN UPPER(COALESCE(method,'GET'))='GET' THEN 0 ELSE 1 END,
-			LENGTH(url),url,parameter LIMIT ?`, targetID, pool)
+			LENGTH(url),url,parameter,method,content_type,location`, targetID)
 	if err != nil {
 		return nil
 	}
@@ -522,11 +518,27 @@ func loadXSSInsertionPoints(ctx context.Context, db *database.DB, targetID strin
 	seen := map[string]bool{}
 	semanticCounts := map[string]int{}
 	var out []insertionPoint
+	siblings := map[string]map[string]string{}
+	types := map[string]map[string]string{}
 	for rows.Next() {
 		var ip insertionPoint
 		var reflected int
 		if rows.Scan(&ip.URL, &ip.Param, &ip.Value, &ip.Method, &ip.ContentType, &ip.Location, &reflected) != nil ||
-			ip.Param == "" || !urlHostInScope(ctx, ip.URL) {
+			ip.Param == "" || !urlHostInScope(ctx, ip.URL) || !urlInEndpointScope(ctx, ip.URL) {
+			continue
+		}
+		ip.Method = strings.ToUpper(strings.TrimSpace(ip.Method))
+		if ip.Method == "" {
+			ip.Method = "GET"
+		}
+		group := insertionSiblingGroupKey(ip)
+		// Continue reading after selecting the capped input set. Required fields
+		// may rank below the selected field and must not disappear at that cap.
+		if siblings[group] != nil {
+			siblings[group][ip.Param] = ip.Value
+			types[group][ip.Param] = insertionJSONType(ip.Location)
+		}
+		if len(out) >= limit {
 			continue
 		}
 		key := insertionIdentity(ip)
@@ -541,9 +553,15 @@ func loadXSSInsertionPoints(ctx context.Context, db *database.DB, targetID strin
 			semanticCounts[routeKey]++
 		}
 		out = append(out, ip)
-		if len(out) >= limit {
-			break
+		if siblings[group] == nil {
+			siblings[group] = map[string]string{ip.Param: ip.Value}
+			types[group] = map[string]string{ip.Param: insertionJSONType(ip.Location)}
 		}
+	}
+	for i := range out {
+		group := insertionSiblingGroupKey(out[i])
+		out[i].Siblings = siblings[group]
+		out[i].SiblingTypes = types[group]
 	}
 	return out
 }

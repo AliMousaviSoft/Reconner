@@ -79,11 +79,11 @@ func TestSuspendThenResumeInterrupted(t *testing.T) {
 	if _, err := s.db.Exec(`INSERT INTO targets (id, domain) VALUES ('tgt1','example.com')`); err != nil {
 		t.Fatalf("insert target: %v", err)
 	}
-	// A running scan of [a,b,c] that already finished module a.
+	// A running scan of three real modules that already finished the first.
 	_, err := s.db.Exec(`INSERT INTO tasks (id, target_id, type, status, priority, modules, total, completed_modules)
 		VALUES ('task1','tgt1','full_scan','running',2,?,3,?)`,
-		models.StringSliceToJSON([]string{"a", "b", "c"}),
-		models.StringSliceToJSON([]string{"a"}))
+		models.StringSliceToJSON([]string{ModuleHTTPProbe, ModuleJSAnalysis, ModuleParamDiscovery}),
+		models.StringSliceToJSON([]string{ModuleHTTPProbe}))
 	if err != nil {
 		t.Fatalf("insert task: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestSuspendThenResumeInterrupted(t *testing.T) {
 		t.Fatalf("ResumeInterrupted = %d, want 1", resumed)
 	}
 
-	// The original is retired, and a fresh pending task covers only [b,c].
+	// The original is retired, and a fresh pending task covers only unfinished modules.
 	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id='task1'`).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
@@ -120,9 +120,9 @@ func TestSuspendThenResumeInterrupted(t *testing.T) {
 		t.Fatalf("no resume task created: %v", err)
 	}
 	got := models.JSONToStringSlice(modsJSON)
-	want := []string{"b", "c"}
-	if len(got) != len(want) || got[0] != "b" || got[1] != "c" {
-		t.Fatalf("resume modules=%v, want %v (must skip completed 'a')", got, want)
+	want := []string{ModuleJSAnalysis, ModuleParamDiscovery}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("resume modules=%v, want %v (must skip completed module)", got, want)
 	}
 	if newStatus != "pending" {
 		t.Fatalf("resume task status=%q, want pending", newStatus)
