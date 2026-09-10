@@ -168,7 +168,8 @@ pointLoop:
 
 	// Promote static DOM-XSS leads to PROVEN findings: drive a real browser to place
 	// an executing payload in each page's location.hash / a query param and confirm
-	// it actually runs. This is the real evidence (a popup PoC), not a static grep.
+	// it actually runs. This is nonce-backed alert('reconner') execution evidence,
+	// not a static grep.
 	if ctx.Err() == nil {
 		VerifyDOMXSSOnPages(ctx, s.db, targetID, logFn)
 	}
@@ -305,8 +306,8 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 					htmlTagInjected(confResp.Body, dastElement) &&
 					!strings.Contains(baseline, needle) {
 					// HTML injection is proven. Now find a payload the app does NOT
-					// filter, so the REPORTED PoC actually pops (the dominant "finds
-					// XSS but no popup" gap): use browser execution proof when
+					// filter, so the reported PoC actually executes (the dominant
+					// "reflected markup but no execution" gap): use browser proof when
 					// available; only its absence permits the short candidate ladder.
 					tryExecutionProof()
 					if proofExecuted {
@@ -359,7 +360,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 				// already shown it was inert.
 				if b.DOMReflectsInsertion(ctx, ip, auth) {
 					if pl, ok := b.ConfirmInsertion(ctx, ip, auth); ok {
-						s.confirmXSS(ctx, targetID, ip, "dom", pl, "browser", 99)
+						s.confirmXSS(ctx, targetID, ip, "dom", pl, "browser", 99, b.RuntimeTrace(ip, auth))
 						out.xssConfirmed++
 					}
 				}
@@ -673,7 +674,7 @@ func (s *DASTScanner) xssCandidate(targetID string, ip insertionPoint, ctxName, 
 // confirmXSS records a CONFIRMED reflected-XSS candidate + a finding. Callers may
 // invoke it only for a browser-observed nonce; browserless differential evidence
 // remains a candidate and never reaches this method.
-func (s *DASTScanner) confirmXSS(ctx context.Context, targetID string, ip insertionPoint, ctxName, execPayload, proof string, confidence int) {
+func (s *DASTScanner) confirmXSS(ctx context.Context, targetID string, ip insertionPoint, ctxName, execPayload, proof string, confidence int, runtimeTrace ...string) {
 	if ctx.Err() != nil || strings.TrimSpace(execPayload) == "" ||
 		(proof != "browser" && proof != "browser+differential") {
 		return
@@ -681,12 +682,15 @@ func (s *DASTScanner) confirmXSS(ctx context.Context, targetID string, ip insert
 	var how string
 	switch proof {
 	case "browser", "browser+differential":
-		how = "EXECUTION CONFIRMED in a real headless browser (JavaScript changed document.title to our random nonce; the reported PoC uses alert(document.domain))"
+		how = "EXECUTION CONFIRMED in a real headless browser (JavaScript changed document.title to our random nonce and showed alert('reconner'); the reported PoC is the exact proof payload)"
 	default:
 		how = "EXECUTION CONFIRMED in a real headless browser using a random document.title nonce"
 	}
 	ev := fmt.Sprintf("Reflected XSS in %s context at parameter %q. %s. Working payload: %s",
 		ctxName, ip.Param, how, execPayload)
+	if len(runtimeTrace) > 0 && strings.TrimSpace(runtimeTrace[0]) != "" {
+		ev += ". Runtime DOM trace: attacker-controlled canary reached " + strings.TrimSpace(runtimeTrace[0])
+	}
 	c := VulnerabilityCandidate{
 		TargetID: targetID, Type: "xss", Subtype: "reflected", URL: ip.URL,
 		Method: ip.Method, Parameter: ip.Param, Location: locOf(ip),

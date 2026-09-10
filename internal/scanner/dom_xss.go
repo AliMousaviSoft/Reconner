@@ -1098,7 +1098,7 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 				}
 			}
 			ev := fmt.Sprintf(
-				"DOM XSS EXECUTION CONFIRMED in a real headless browser: a payload placed in the page's %s executed and changed the document title to a random nonce after the page rendered. Reflection alone cannot produce this proof.\n  Working PoC (open in a browser — it pops alert(document.domain)): %s\n  Payload: %s",
+				"DOM XSS EXECUTION CONFIRMED in a real headless browser: a payload placed in the page's %s executed, changed the document title to a random nonce, and showed alert('reconner') after the page rendered. Reflection alone cannot produce the nonce proof.\n  Working non-exfiltrating PoC (open in a browser — it shows alert('reconner')): %s\n  Payload: %s",
 				src, poc, pl)
 			_, _ = RecordDetectorObservation(ctx, db, DetectorObservation{
 				TargetID: targetID, Type: "dom_xss", Subtype: test.mode, Severity: "high",
