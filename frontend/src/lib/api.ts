@@ -135,6 +135,45 @@ export const targets = {
   },
 }
 
+export interface CapturePreviewItem {
+  sequence: number; method: string; route: string; status: number
+  operation_kind: string; sensitive: boolean; header_names?: string[]
+  request_body_bytes: number; response_body_bytes: number
+  accepted: boolean; reject_reason?: string; suggested_tests?: string[]; auto_eligible: boolean
+}
+
+export interface CapturePreview {
+  source: string; total: number; accepted: number; rejected: number; sensitive: number
+  read_only: number; state_changing: number; authentication: number; unknown: number
+  items: CapturePreviewItem[]
+}
+
+function captureForm(file: File, source: string, identityLabel: string, label: string) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('source', source)
+  form.append('identity_label', identityLabel)
+  form.append('label', label)
+  return form
+}
+
+export const captures = {
+  preview: (targetId: string, file: File, source: string, identityLabel: string, label: string) =>
+    req<{ preview: CapturePreview; passive: boolean; traffic_sent: number }>(`/targets/${targetId}/captures/preview`, {
+      method: 'POST', headers: {}, body: captureForm(file, source, identityLabel, label),
+    }),
+  import: (targetId: string, file: File, source: string, identityLabel: string, label: string) =>
+    req<{ capture_id: string; preview: CapturePreview; templates_stored: number; passive: boolean; traffic_sent: number }>(`/targets/${targetId}/captures`, {
+      method: 'POST', headers: {}, body: captureForm(file, source, identityLabel, label),
+    }),
+  list: (targetId: string) => req<{ id: string; source: string; identity_label: string; label: string; status: string; imported: number; accepted: number; rejected: number; created_at: string; expires_at: string }[]>(`/targets/${targetId}/captures`),
+  preflight: (targetId: string, captureId: string) => req<{
+    capture_id: string; ready: number; blocked: number; failed_or_stale: number
+    requests_sent: number; mutations_sent: number; mode: string
+    results: { template_id: string; method: string; route: string; status: string; http_status: number; captured_status: number; baseline_match: boolean; reason: string; timing_ms: number }[]
+  }>(`/targets/${targetId}/captures/${captureId}/preflight`, { method: 'POST', body: JSON.stringify({}) }),
+}
+
 export interface BountyProgramList {
   programs: BountyProgram[]
   total: number

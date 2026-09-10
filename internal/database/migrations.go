@@ -80,6 +80,9 @@ func RunMigrations(db *DB) error {
 		createAuthzObservationsTable,
 		createHypothesesTable,
 		createStateSnapshotsTable,
+		createCaptureSessionsTable,
+		createRequestTemplatesTable,
+		createCapturedResponsesTable,
 		createCandidatesTable,
 		alterNucleiFindingsAddVerification,
 		alterNucleiFindingsAddConfidence,
@@ -662,6 +665,68 @@ CREATE TABLE IF NOT EXISTS state_snapshots (
 	source TEXT DEFAULT '',
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);`
+
+// Hybrid guided-crawl captures keep full HTTP messages in a sealed layer. The
+// ordinary interaction/search/report tables receive only redacted metadata.
+// Importing these rows is passive; replay is a separate, explicitly authorized
+// operation.
+const createCaptureSessionsTable = `
+CREATE TABLE IF NOT EXISTS capture_sessions (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	source TEXT NOT NULL,
+	identity_id TEXT DEFAULT '',
+	identity_label TEXT DEFAULT '',
+	label TEXT DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'imported',
+	imported_count INTEGER DEFAULT 0,
+	accepted_count INTEGER DEFAULT 0,
+	rejected_count INTEGER DEFAULT 0,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	expires_at DATETIME,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);`
+
+const createRequestTemplatesTable = `
+CREATE TABLE IF NOT EXISTS request_templates (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	capture_session_id TEXT NOT NULL,
+	identity_id TEXT DEFAULT '',
+	method TEXT NOT NULL DEFAULT 'GET',
+	norm_url TEXT NOT NULL DEFAULT '',
+	content_type TEXT DEFAULT '',
+	operation_kind TEXT NOT NULL DEFAULT 'unknown',
+	request_shape_hash TEXT NOT NULL,
+	encrypted_request TEXT NOT NULL,
+	redacted_preview TEXT DEFAULT '',
+	replay_policy TEXT NOT NULL DEFAULT 'manual_only',
+	preflight_status TEXT NOT NULL DEFAULT 'not_run',
+	preflight_http_status INTEGER DEFAULT 0,
+	preflight_reason TEXT DEFAULT '',
+	preflight_at DATETIME,
+	source TEXT NOT NULL,
+	sequence INTEGER NOT NULL DEFAULT 0,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(capture_session_id, request_shape_hash),
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE,
+	FOREIGN KEY (capture_session_id) REFERENCES capture_sessions(id) ON DELETE CASCADE
+);`
+
+const createCapturedResponsesTable = `
+CREATE TABLE IF NOT EXISTS captured_responses (
+	id TEXT PRIMARY KEY,
+	request_template_id TEXT NOT NULL UNIQUE,
+	status INTEGER DEFAULT 0,
+	content_type TEXT DEFAULT '',
+	body_hash TEXT DEFAULT '',
+	encrypted_response TEXT DEFAULT '',
+	redacted_preview TEXT DEFAULT '',
+	response_len INTEGER DEFAULT 0,
+	timing_ms INTEGER DEFAULT 0,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (request_template_id) REFERENCES request_templates(id) ON DELETE CASCADE
 );`
 
 // candidates is the unified pre-finding lifecycle (CANDIDATE→DETECTED→VERIFYING→
