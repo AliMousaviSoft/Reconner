@@ -1,14 +1,18 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/mux"
+	"github.com/recon-platform/internal/capture"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
+	"github.com/recon-platform/internal/secret"
 )
 
 func newGuidedHandlerTestDB(t *testing.T) (*database.DB, *Handler) {
@@ -102,5 +106,50 @@ func TestExpiredCaptureCannotRevealRequest(t *testing.T) {
 	h.handleRevealCaptureTemplate(w, r)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expired request was revealable: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestCaptureTemplatesReturnValueFreeTestSuggestions(t *testing.T) {
+	db, h := newGuidedHandlerTestDB(t)
+	if _, err := db.Exec(`INSERT INTO capture_sessions(id,target_id,source) VALUES('suggestions','target','test')`); err != nil {
+		t.Fatal(err)
+	}
+	request := capture.Request{
+		Method:   http.MethodPost,
+		URL:      "https://app.example.test/orders/91723?next=https%3A%2F%2Fprivate.example%2Fafter&search=private-search",
+		MimeType: "application/json",
+		Headers:  []capture.Header{{Name: "Cookie", Value: "sid=top-secret"}},
+		Body:     []byte(`{"user_id":"507f1f77bcf86cd799439011","message":"private-message"}`),
+	}
+	plain, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted := secret.New(h.cfg.SessionSecret).Encrypt(string(plain))
+	if _, err := db.Exec(`INSERT INTO request_templates(id,target_id,capture_session_id,method,norm_url,operation_kind,preflight_status,request_shape_hash,encrypted_request,source)
+		VALUES('suggested-template','target','suggestions','POST','https://app.example.test/orders/{id}','state_changing','ready','shape',?,'test')`, encrypted); err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/api/targets/target/captures/suggestions/templates", nil)
+	r = mux.SetURLVars(r, map[string]string{"id": "target", "cid": "suggestions"})
+	w := httptest.NewRecorder()
+	h.handleCaptureTemplates(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("templates failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, expected := range []string{`"module":"idor"`, `"module":"sqli"`, `"module":"xss"`, `"module":"open_redirect"`, `"parameter":"/user_id"`} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("missing suggestion %s in %s", expected, body)
+		}
+	}
+	for _, sensitive := range []string{"top-secret", "private-search", "private.example", "private-message", "507f1f77bcf86cd799439011"} {
+		if strings.Contains(body, sensitive) {
+			t.Errorf("template list leaked captured value %q", sensitive)
+		}
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control=%q, want no-store", got)
 	}
 }

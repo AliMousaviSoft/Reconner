@@ -21,7 +21,7 @@ func (h *Handler) captureAudit(r *http.Request, id, action string) error {
 
 func (h *Handler) handleCaptureTemplates(w http.ResponseWriter, r *http.Request) {
 	v := mux.Vars(r)
-	rows, e := h.db.QueryContext(r.Context(), `SELECT rt.id,rt.method,rt.norm_url,rt.operation_kind,rt.preflight_status,rt.request_shape_hash
+	rows, e := h.db.QueryContext(r.Context(), `SELECT rt.id,rt.method,rt.norm_url,rt.operation_kind,rt.preflight_status,rt.request_shape_hash,rt.encrypted_request
 		FROM request_templates rt JOIN capture_sessions cs ON cs.id=rt.capture_session_id
 		WHERE rt.target_id=? AND rt.capture_session_id=? AND cs.target_id=?
 		AND (cs.expires_at IS NULL OR cs.expires_at>datetime('now')) ORDER BY rt.sequence,rt.id`, v["id"], v["cid"], v["id"])
@@ -30,19 +30,30 @@ func (h *Handler) handleCaptureTemplates(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer rows.Close()
-	items := []map[string]string{}
+	items := []map[string]any{}
+	box := secret.New(h.cfg.SessionSecret)
 	for rows.Next() {
-		var id, method, route, kind, status, version string
-		if e := rows.Scan(&id, &method, &route, &kind, &status, &version); e != nil {
+		var id, method, route, kind, status, version, encrypted string
+		if e := rows.Scan(&id, &method, &route, &kind, &status, &version, &encrypted); e != nil {
 			h.writeError(w, 500, "could not decode request")
 			return
 		}
-		items = append(items, map[string]string{"id": id, "method": method, "route": route, "kind": kind, "preflight_status": status, "version": version})
+		var request capture.Request
+		if json.Unmarshal([]byte(box.Decrypt(encrypted)), &request) != nil {
+			h.writeError(w, 500, "request could not be decrypted")
+			return
+		}
+		items = append(items, map[string]any{
+			"id": id, "method": method, "route": route, "kind": kind,
+			"preflight_status": status, "version": version,
+			"suggestions": scanner.DiscoverGuidedOpportunities(request),
+		})
 	}
 	if e := rows.Err(); e != nil {
 		h.writeError(w, 500, "could not load requests")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	h.writeSuccess(w, items)
 }
 
@@ -159,10 +170,11 @@ func (h *Handler) handleEditCaptureTemplate(w http.ResponseWriter, r *http.Reque
 func (h *Handler) handleAnalyzeCapture(w http.ResponseWriter, r *http.Request) {
 	v := mux.Vars(r)
 	var input struct {
-		TemplateIDs []string `json:"template_ids"`
-		Modules     []string `json:"modules"`
-		AllowUnsafe bool     `json:"allow_unsafe"`
-		Confirm     bool     `json:"confirm_active"`
+		TemplateIDs []string              `json:"template_ids"`
+		Modules     []string              `json:"modules"`
+		Checks      []scanner.GuidedCheck `json:"checks"`
+		AllowUnsafe bool                  `json:"allow_unsafe"`
+		Confirm     bool                  `json:"confirm_active"`
 	}
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10))
 	d.DisallowUnknownFields()
@@ -179,34 +191,72 @@ func (h *Handler) handleAnalyzeCapture(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, 503, "scheduler unavailable")
 		return
 	}
-	if len(input.TemplateIDs) == 0 {
-		h.writeError(w, 400, "select between 1 and 50 requests per run")
-		return
-	}
-	if len(input.Modules) == 0 {
-		input.Modules = append([]string{}, scanner.GuidedModules...)
-	}
 	known := map[string]bool{}
 	for _, m := range scanner.GuidedModules {
 		known[m] = true
 	}
-	seen := map[string]bool{}
+	seenModules := map[string]bool{}
 	var modules []string
-	for _, m := range input.Modules {
-		if !known[m] {
-			h.writeError(w, 400, "unsupported guided module")
+	var checks []scanner.GuidedCheck
+	var templateIDs []string
+	if len(input.Checks) > 0 {
+		if len(input.Checks) > 200 {
+			h.writeError(w, 400, "select between 1 and 200 suggested checks per run")
 			return
 		}
-		if !seen[m] {
-			modules = append(modules, m)
-			seen[m] = true
+		seenChecks := map[string]bool{}
+		seenTemplates := map[string]bool{}
+		for _, check := range input.Checks {
+			check.TemplateID = strings.TrimSpace(check.TemplateID)
+			check.Module = strings.TrimSpace(check.Module)
+			if check.TemplateID == "" || !known[check.Module] {
+				h.writeError(w, 400, "unsupported or incomplete guided check")
+				return
+			}
+			key := check.TemplateID + "\x00" + check.Module
+			if seenChecks[key] {
+				continue
+			}
+			seenChecks[key] = true
+			checks = append(checks, check)
+			if !seenModules[check.Module] {
+				modules = append(modules, check.Module)
+				seenModules[check.Module] = true
+			}
+			if !seenTemplates[check.TemplateID] {
+				templateIDs = append(templateIDs, check.TemplateID)
+				seenTemplates[check.TemplateID] = true
+			}
 		}
+	} else {
+		if len(input.TemplateIDs) == 0 {
+			h.writeError(w, 400, "select between 1 and 50 requests per run")
+			return
+		}
+		if len(input.Modules) == 0 {
+			input.Modules = append([]string{}, scanner.GuidedModules...)
+		}
+		for _, m := range input.Modules {
+			if !known[m] {
+				h.writeError(w, 400, "unsupported guided module")
+				return
+			}
+			if !seenModules[m] {
+				modules = append(modules, m)
+				seenModules[m] = true
+			}
+		}
+		templateIDs = input.TemplateIDs
 	}
-	job := scanner.GuidedInput{Modules: modules, AllowUnsafe: input.AllowUnsafe}
+	if len(templateIDs) == 0 || len(modules) == 0 {
+		h.writeError(w, 400, "select at least one guided check")
+		return
+	}
+	job := scanner.GuidedInput{Modules: modules, Checks: checks, AllowUnsafe: input.AllowUnsafe}
 	box := secret.New(h.cfg.SessionSecret)
 	ids := map[string]bool{}
 	total := 0
-	for _, id := range input.TemplateIDs {
+	for _, id := range templateIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue

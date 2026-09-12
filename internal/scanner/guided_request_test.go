@@ -108,3 +108,30 @@ func TestGuidedRoundTripCannotEscapeTemplate(t *testing.T) {
 		t.Fatalf("query-only mutation was blocked: %v", err)
 	}
 }
+
+func TestGuidedRoundTripAllowsOnlyDiscoveredObjectPathMutation(t *testing.T) {
+	base := capture.Request{Method: http.MethodGet, URL: "https://app.example.test/orders/12345/details?view=full"}
+	g := &guidedContext{request: base, points: guidedIDORPoints(base), transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok")), Request: r}, nil
+	})}
+	for _, rawURL := range []string{
+		"https://app.example.test/orders/12346/details?view=full",
+		"https://app.example.test/orders/12344/details?view=changed",
+	} {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+		if _, err := g.roundTrip(req); err != nil {
+			t.Fatalf("discovered object path mutation was blocked: %s: %v", rawURL, err)
+		}
+	}
+	for _, rawURL := range []string{
+		"https://app.example.test/accounts/12346/details?view=full",
+		"https://app.example.test/orders/12346/summary?view=full",
+		"https://app.example.test/orders/../details?view=full",
+		"https://app.example.test/orders/12346/extra/details?view=full",
+	} {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+		if _, err := g.roundTrip(req); err == nil {
+			t.Fatalf("non-object or unrelated path mutation escaped template: %s", rawURL)
+		}
+	}
+}

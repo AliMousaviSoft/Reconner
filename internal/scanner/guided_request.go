@@ -109,6 +109,35 @@ func guidedPoints(r capture.Request) []guidedPoint {
 	return out
 }
 
+func guidedIDORPoints(r capture.Request) []guidedPoint {
+	points := guidedPoints(r)
+	out := make([]guidedPoint, 0, len(points))
+	for _, point := range points {
+		if looksGuidedObjectID(point.ip.Value) {
+			out = append(out, point)
+		}
+	}
+	u, err := url.Parse(r.URL)
+	if err != nil {
+		return out
+	}
+	parts := strings.Split(u.Path, "/")
+	logicalIndex := 0
+	for actualIndex, value := range parts {
+		if value == "" {
+			continue
+		}
+		if looksGuidedObjectID(value) {
+			out = append(out, guidedPoint{
+				ip:   insertionPoint{URL: r.URL, Method: r.Method, ContentType: r.MimeType, Location: "path", Param: "path[" + strconv.Itoa(logicalIndex) + "]", Value: value},
+				path: []string{strconv.Itoa(actualIndex)},
+			})
+		}
+		logicalIndex++
+	}
+	return out
+}
+
 func replaceGuidedValue(raw, key, value, operator string, occurrence int) string {
 	parts := strings.Split(raw, "&")
 	n := 0
@@ -146,7 +175,18 @@ func (g *guidedContext) injected(ctx context.Context, ip insertionPoint, value, 
 	if point == nil {
 		return nil, fmt.Errorf("insertion point not in captured template")
 	}
-	if ip.Location == "query" {
+	if ip.Location == "path" {
+		u, _ := url.Parse(r.URL)
+		parts := strings.Split(u.Path, "/")
+		index, e := strconv.Atoi(point.path[0])
+		if e != nil || index < 0 || index >= len(parts) {
+			return nil, fmt.Errorf("path insertion point is invalid")
+		}
+		parts[index] = value
+		u.Path = strings.Join(parts, "/")
+		u.RawPath = ""
+		r.URL = u.String()
+	} else if ip.Location == "query" {
 		u, _ := url.Parse(r.URL)
 		u.RawQuery = replaceGuidedValue(u.RawQuery, ip.Param, value, operator, point.occurrence)
 		r.URL = u.String()
@@ -204,7 +244,7 @@ func guidedHTTPRequest(ctx context.Context, r capture.Request) (*http.Request, e
 
 func (g *guidedContext) roundTrip(req *http.Request) (*http.Response, error) {
 	u, _ := url.Parse(g.request.URL)
-	if req.Method != g.request.Method || !strings.EqualFold(req.URL.Scheme, u.Scheme) || !strings.EqualFold(req.URL.Host, u.Host) || req.URL.EscapedPath() != u.EscapedPath() {
+	if req.Method != g.request.Method || !strings.EqualFold(req.URL.Scheme, u.Scheme) || !strings.EqualFold(req.URL.Host, u.Host) || !g.guidedPathAllowed(u, req.URL) {
 		g.mu.Lock()
 		g.blocked++
 		g.mu.Unlock()
@@ -251,6 +291,40 @@ func (g *guidedContext) roundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	return resp, e
+}
+
+func (g *guidedContext) guidedPathAllowed(base, candidate *url.URL) bool {
+	if candidate.EscapedPath() == base.EscapedPath() {
+		return true
+	}
+	baseParts := strings.Split(base.Path, "/")
+	candidateParts := strings.Split(candidate.Path, "/")
+	if len(baseParts) != len(candidateParts) {
+		return false
+	}
+	changed := -1
+	for i := range baseParts {
+		if baseParts[i] == candidateParts[i] {
+			continue
+		}
+		if changed >= 0 {
+			return false
+		}
+		changed = i
+	}
+	if changed < 0 || !looksGuidedObjectID(candidateParts[changed]) {
+		return false
+	}
+	for _, point := range g.points {
+		if point.ip.Location != "path" || len(point.path) != 1 {
+			continue
+		}
+		index, err := strconv.Atoi(point.path[0])
+		if err == nil && index == changed {
+			return true
+		}
+	}
+	return false
 }
 
 var guidedClient = &http.Client{Transport: identityRoundTripper{}, Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

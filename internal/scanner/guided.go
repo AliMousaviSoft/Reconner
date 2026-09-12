@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,9 +18,8 @@ import (
 	"github.com/recon-platform/pkg/logger"
 )
 
-var GuidedModules = []string{"passive", "xss", "sqli", "nosqli", "ssti", "lfi", "ssrf", "open_redirect", "cors"}
+var GuidedModules = []string{"passive", "idor", "xss", "sqli", "nosqli", "ssti", "lfi", "ssrf", "open_redirect", "cors"}
 var GuidedManualModules = map[string]string{
-	"idor":         "requires two independently verified identities and object ownership",
 	"authz":        "requires role/permission and expected access decisions",
 	"csrf":         "requires a verified state change and browser cookie semantics",
 	"xxe":          "XML entity insertion is not supported by the exact-template adapter",
@@ -38,9 +38,14 @@ type GuidedTemplate struct {
 	Request  capture.Request  `json:"request"`
 	Response capture.Response `json:"response"`
 }
+type GuidedCheck struct {
+	TemplateID string `json:"template_id"`
+	Module     string `json:"module"`
+}
 type GuidedInput struct {
 	Templates   []GuidedTemplate `json:"templates"`
 	Modules     []string         `json:"modules"`
+	Checks      []GuidedCheck    `json:"checks,omitempty"`
 	AllowUnsafe bool             `json:"allow_unsafe"`
 }
 type GuidedResult struct {
@@ -102,47 +107,70 @@ func newGuidedDB() (*database.DB, error) {
 // pins all detector traffic to that template. No crawler, CLI or browser runs.
 func RunGuided(ctx context.Context, db *database.DB, targetID string, input GuidedInput, inScope func(string) bool, progress func(GuidedReport)) (GuidedReport, error) {
 	report := GuidedReport{Results: []GuidedResult{}, Manual: GuidedManualModules}
-	for _, t := range input.Templates {
-		for _, module := range input.Modules {
-			if ctx.Err() != nil {
-				return report, ctx.Err()
+	templates := make(map[string]GuidedTemplate, len(input.Templates))
+	for _, template := range input.Templates {
+		templates[template.ID] = template
+	}
+	for _, check := range guidedChecks(input) {
+		if ctx.Err() != nil {
+			return report, ctx.Err()
+		}
+		t, ok := templates[check.TemplateID]
+		r := GuidedResult{TemplateID: check.TemplateID, Module: check.Module, Status: "completed", Findings: []GuidedFinding{}}
+		switch {
+		case !ok:
+			r.Status = "blocked"
+			r.Reason = "request template is unavailable"
+		case !inScope(t.Request.URL):
+			r.Status = "blocked"
+			r.Reason = "request is no longer in project scope"
+		case check.Module != "passive" && !capture.SafeAutomaticReplay(t.Request) && !input.AllowUnsafe:
+			r.Status = "skipped"
+			r.Reason = "state-changing or non-safe request: explicit approval required"
+		default:
+			var e error
+			r, e = runGuidedModule(ctx, t, check.Module)
+			if e != nil {
+				r.Status = "failed"
+				r.Reason = "module could not initialize or persist results"
 			}
-			r := GuidedResult{TemplateID: t.ID, Module: module, Status: "completed", Findings: []GuidedFinding{}}
-			switch {
-			case !inScope(t.Request.URL):
-				r.Status = "blocked"
-				r.Reason = "request is no longer in project scope"
-			case module != "passive" && !capture.SafeAutomaticReplay(t.Request) && !input.AllowUnsafe:
-				r.Status = "skipped"
-				r.Reason = "state-changing or non-safe request: explicit approval required"
-			default:
-				var e error
-				r, e = runGuidedModule(ctx, t, module)
+			for i := range r.Findings {
+				f := &r.Findings[i]
+				verdict := CandDetected
+				if f.Verdict == CandConfirmed {
+					verdict = VerifyVerified
+				} else if f.Verdict == CandInconclusive {
+					verdict = VerifyInconclusive
+				}
+				ids, e := RecordDetectorObservation(ctx, db, DetectorObservation{TargetID: targetID, Type: f.Type, Severity: f.Severity, URL: capture.SafeDisplayURL(t.Request.URL), Method: t.Request.Method, Parameter: f.Parameter, Location: "capture:" + t.ID, Source: "guided-capture", DetectionMethod: check.Module, Confidence: 70, Provenance: "capture-template:" + t.ID, Verdict: verdict, Evidence: "Guided capture evidence is encrypted. Open the capture test case; template " + t.ID})
 				if e != nil {
-					r.Status = "failed"
-					r.Reason = "module could not initialize or persist results"
+					return report, fmt.Errorf("persist guided finding: %w", e)
 				}
-				for i := range r.Findings {
-					f := &r.Findings[i]
-					verdict := CandDetected
-					if f.Verdict == CandConfirmed {
-						verdict = VerifyVerified
-					}
-					ids, e := RecordDetectorObservation(ctx, db, DetectorObservation{TargetID: targetID, Type: f.Type, Severity: f.Severity, URL: capture.SafeDisplayURL(t.Request.URL), Method: t.Request.Method, Parameter: f.Parameter, Location: "capture:" + t.ID, Source: "guided-capture", DetectionMethod: module, Confidence: 70, Provenance: "capture-template:" + t.ID, Verdict: verdict, Evidence: "Guided capture evidence is encrypted. Open the capture test case; template " + t.ID})
-					if e != nil {
-						return report, fmt.Errorf("persist guided finding: %w", e)
-					}
-					f.FindingID = ids.FindingID
-				}
+				f.FindingID = ids.FindingID
 			}
-			report.Results = append(report.Results, r)
-			if progress != nil {
-				progress(report)
-			}
+		}
+		report.Results = append(report.Results, r)
+		if progress != nil {
+			progress(report)
 		}
 	}
 	return report, nil
 }
+
+func guidedChecks(input GuidedInput) []GuidedCheck {
+	if len(input.Checks) > 0 {
+		return input.Checks
+	}
+	checks := make([]GuidedCheck, 0, len(input.Templates)*len(input.Modules))
+	for _, template := range input.Templates {
+		for _, module := range input.Modules {
+			checks = append(checks, GuidedCheck{TemplateID: template.ID, Module: module})
+		}
+	}
+	return checks
+}
+
+func GuidedCheckCount(input GuidedInput) int { return len(guidedChecks(input)) }
 
 func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (result GuidedResult, err error) {
 	result = GuidedResult{TemplateID: t.ID, Module: module, Status: "completed", Findings: []GuidedFinding{}}
@@ -171,6 +199,9 @@ func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (r
 		return result, nil
 	}
 	points := guidedPoints(t.Request)
+	if module == "idor" {
+		points = guidedIDORPoints(t.Request)
+	}
 	if len(points) == 0 && module != "cors" {
 		result.Status = "skipped"
 		result.Reason = "no supported query, form or JSON insertion points; XML/multipart/header/path mutation requires manual testing"
@@ -221,6 +252,8 @@ func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (r
 	log := logger.NewWithWriter("error", io.Discard)
 	silent := func(string, string, string) {}
 	switch module {
+	case "idor":
+		guidedIDORChecks(ctx, scratch, t, body)
 	case "ssti":
 		err = NewSSTIScanner(scratch, nil, cfg, log, nil).Run(ctx, t.ID, silent)
 	case "lfi":
@@ -294,6 +327,75 @@ func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (r
 		result.Reason += " In-band only; OAST callbacks not enabled."
 	}
 	return result, err
+}
+
+// guidedIDORChecks performs a bounded single-identity differential. A readable
+// neighbouring object is deliberately INCONCLUSIVE: only an independently
+// authenticated second identity and known ownership can confirm horizontal
+// authorization failure.
+func guidedIDORChecks(ctx context.Context, db *database.DB, t GuidedTemplate, baseline []byte) {
+	g := guidedFrom(ctx)
+	for _, point := range g.points {
+		if ctx.Err() != nil {
+			return
+		}
+		payloads := guidedIDORPayloads(point.ip.Value)
+		for _, payload := range payloads {
+			req, err := g.injected(ctx, point.ip, payload, "")
+			if err != nil {
+				continue
+			}
+			resp, err := guidedClient.Do(req)
+			if err != nil {
+				g.mu.Lock()
+				g.failed++
+				g.mu.Unlock()
+				continue
+			}
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512*1024+1))
+			resp.Body.Close()
+			if readErr != nil || len(body) > 512*1024 {
+				continue
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 || looksLikeBlockPage(resp.StatusCode, string(body)) || BodyHash(string(body)) == BodyHash(string(baseline)) {
+				continue
+			}
+			baseLen, probeLen := len(baseline), len(body)
+			if baseLen < 64 || probeLen < baseLen/3 || probeLen > baseLen*3 {
+				continue
+			}
+			_, _ = RecordDetectorObservation(ctx, db, DetectorObservation{
+				TargetID: t.ID, Type: "idor", Severity: "medium", URL: t.Request.URL,
+				Method: t.Request.Method, Parameter: point.ip.Param, Location: point.ip.Location,
+				Payload: payload, Source: "guided", DetectionMethod: "single-identity-differential",
+				Confidence: 65, Verdict: CandInconclusive,
+				Evidence: fmt.Sprintf("A changed object identifier returned HTTP %d with a distinct, structurally comparable response (%dB baseline, %dB alternate). Confirm ownership using a second identity before reporting IDOR.", resp.StatusCode, baseLen, probeLen),
+			})
+			break
+		}
+	}
+}
+
+func guidedIDORPayloads(value string) []string {
+	if n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+		out := []string{}
+		if n > 1 {
+			out = append(out, strconv.FormatInt(n-1, 10))
+		}
+		if n < 1<<62 {
+			out = append(out, strconv.FormatInt(n+1, 10))
+		}
+		return out
+	}
+	if len(value) >= 16 {
+		last := value[len(value)-1]
+		replacement := byte('0')
+		if last == replacement {
+			replacement = '1'
+		}
+		return []string{value[:len(value)-1] + string(replacement)}
+	}
+	return nil
 }
 
 func guidedSmallChecks(ctx context.Context, db *database.DB, t GuidedTemplate, module string, baseline []byte) {

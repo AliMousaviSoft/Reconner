@@ -152,7 +152,9 @@ export interface CapturedRequest { method: string; url: string; http_version?: s
 export interface GuidedFinding { type: string; parameter: string; severity: string; verdict: string; evidence: string; payload: string; test_case?: CapturedRequest; finding_id?: string }
 export interface GuidedReport { results?: { template_id: string; module: string; status: string; reason: string; requests: number; findings: GuidedFinding[] }[]; manual_modules?: Record<string, string> }
 export interface GuidedRun { id: string; task_id: string; status: string; report: GuidedReport; created_at: string }
-export interface CaptureTemplate { id: string; method: string; route: string; kind: string; preflight_status: string; version: string }
+export interface GuidedOpportunity { module: string; parameter: string; location: string; confidence: number; reason: string; payloads?: string[]; automated: boolean }
+export interface GuidedCheck { template_id: string; module: string }
+export interface CaptureTemplate { id: string; method: string; route: string; kind: string; preflight_status: string; version: string; suggestions: GuidedOpportunity[] }
 
 function captureForm(file: File, source: string, identityLabel: string, label: string) {
   const form = new FormData()
@@ -169,6 +171,7 @@ export const captures = {
 	reveal: (targetId: string, captureId: string, id: string) => req<{ request: CapturedRequest; version: string }>(`/targets/${targetId}/captures/${captureId}/templates/${id}/reveal`, { method: 'POST' }),
 	edit: (targetId: string, captureId: string, id: string, request: CapturedRequest, version: string) => req<{ version: string }>(`/targets/${targetId}/captures/${captureId}/templates/${id}`, { method: 'PUT', body: JSON.stringify({ request, version }) }),
 	analyze: (targetId: string, captureId: string, template_ids: string[], modules: string[], allow_unsafe: boolean) => req<{ run_id: string; task_id: string }>(`/targets/${targetId}/captures/${captureId}/analyze`, { method: 'POST', body: JSON.stringify({ template_ids, modules, allow_unsafe, confirm_active: true }) }),
+	analyzeChecks: (targetId: string, captureId: string, checks: GuidedCheck[], allow_unsafe: boolean) => req<{ run_id: string; task_id: string }>(`/targets/${targetId}/captures/${captureId}/analyze`, { method: 'POST', body: JSON.stringify({ checks, allow_unsafe, confirm_active: true }) }),
 	runs: (targetId: string, captureId: string) => req<GuidedRun[]>(`/targets/${targetId}/captures/${captureId}/runs`),
 	revealReport: (targetId: string, captureId: string, id: string) => req<GuidedReport>(`/targets/${targetId}/captures/${captureId}/runs/${id}/reveal`, { method: 'POST' }),
   preview: (targetId: string, file: File, source: string, identityLabel: string, label: string) =>

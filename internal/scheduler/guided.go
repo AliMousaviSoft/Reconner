@@ -42,7 +42,8 @@ func (s *Scheduler) executeGuidedTask(parent context.Context, taskID, targetID, 
 	} else if e = json.Unmarshal([]byte(box.Decrypt(sealed)), &input); e != nil {
 		runErr = e
 	} else {
-		_, _ = s.db.Exec(`UPDATE tasks SET total=? WHERE id=?`, len(input.Templates)*len(input.Modules), taskID)
+		total := scanner.GuidedCheckCount(input)
+		_, _ = s.db.Exec(`UPDATE tasks SET total=? WHERE id=?`, total, taskID)
 		_, runErr = scanner.RunGuided(ctx, s.db, targetID, input, func(raw string) bool { return scanner.GuidedURLInScope(ctx, s.db, targetID, raw) }, func(report scanner.GuidedReport) {
 			b, _ := json.Marshal(report)
 			safe, _ := json.Marshal(scanner.PublicGuidedReport(report))
@@ -57,7 +58,7 @@ func (s *Scheduler) executeGuidedTask(parent context.Context, taskID, targetID, 
 			}
 			latest := report.Results[len(report.Results)-1]
 			_, _ = s.db.Exec(`UPDATE tasks SET progress=?,current_module=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, len(report.Results), latest.Module, taskID)
-			s.hub.Broadcast("task_progress", map[string]any{"task_id": taskID, "target_id": targetID, "progress": len(report.Results), "total": len(input.Templates) * len(input.Modules), "current_module": latest.Module})
+			s.hub.Broadcast("task_progress", map[string]any{"task_id": taskID, "target_id": targetID, "progress": len(report.Results), "total": total, "current_module": latest.Module})
 			logFn("info", latest.Module, fmt.Sprintf("Template %s: %s (%d requests, %d findings). %s", latest.TemplateID, latest.Status, latest.Requests, len(latest.Findings), latest.Reason))
 			// Guided execution is intentionally monolithic, so its progress boundary
 			// is also its module-boundary pause gate. The in-flight check completes,
