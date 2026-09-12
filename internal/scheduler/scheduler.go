@@ -527,27 +527,32 @@ func (s *Scheduler) SuspendActiveForShutdown() (int, error) {
 // scans were resumed. Runs ONLY in the long-lived serve process (it enqueues onto
 // the worker pool) during service startup.
 func (s *Scheduler) ResumeInterrupted() int {
-	rows, err := s.db.Query(`SELECT id FROM tasks WHERE status=?`, InterruptedStatus)
+	rows, err := s.db.Query(`SELECT id,COALESCE(type,'') FROM tasks WHERE status=?`, InterruptedStatus)
 	if err != nil {
 		return 0
 	}
-	var ids []string
+	type interruptedTask struct{ id, taskType string }
+	var tasks []interruptedTask
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
+		var task interruptedTask
+		if err := rows.Scan(&task.id, &task.taskType); err == nil {
+			tasks = append(tasks, task)
 		}
 	}
 	rows.Close()
 
 	resumed := 0
-	for _, id := range ids {
+	for _, task := range tasks {
 		// Retire the parked task to a terminal state ResumeTask accepts, so its row
 		// is a clean record and can never be resumed twice.
-		_, _ = s.db.Exec(`UPDATE tasks SET status='cancelled', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-		if _, err := s.ResumeTask(id); err != nil {
+		_, _ = s.db.Exec(`UPDATE tasks SET status='cancelled', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, task.id)
+		if task.taskType == "guided_capture" {
+			s.logger.Warn("Guided run was not auto-resumed; active approval must be renewed from the capture page", "task", task.id)
+			continue
+		}
+		if _, err := s.ResumeTask(task.id); err != nil {
 			if err != ErrNothingToResume {
-				s.logger.Warn("Could not auto-resume interrupted scan", "task", id, "err", err)
+				s.logger.Warn("Could not auto-resume interrupted scan", "task", task.id, "err", err)
 			}
 			continue
 		}
@@ -556,6 +561,11 @@ func (s *Scheduler) ResumeInterrupted() int {
 	if resumed > 0 {
 		s.logger.Info("Auto-resumed scans interrupted by the last shutdown", "count", resumed)
 	}
+	// A guided task deliberately remains cancelled until the operator reviews and
+	// re-approves it. Clear any target-level paused marker that no longer has a
+	// live task behind it, including fully-completed interrupted tasks.
+	_, _ = s.db.Exec(`UPDATE targets SET scan_status='idle',updated_at=CURRENT_TIMESTAMP
+		WHERE scan_status='paused' AND id NOT IN (SELECT target_id FROM tasks WHERE status IN ('pending','running','paused','interrupted'))`)
 	return resumed
 }
 
@@ -648,7 +658,7 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 	// against the PREVIOUS HTTP/JS baseline before http_probe/js_analysis refresh
 	// those rows. The generic capability planner sorts probes before detectors,
 	// which erased status/title/JS changes and made monitoring miss real drift.
-	if typeTag != monitorWatchType {
+	if typeTag != monitorWatchType && typeTag != "guided_capture" {
 		modules = PlanModules(modules)
 	}
 
@@ -699,6 +709,11 @@ var ErrNothingToResume = fmt.Errorf("nothing to resume: all modules already comp
 // This is what turns "an 8h watchdog killed a big scan 90% through" into
 // "re-run the last one module" rather than "start over from zero".
 func (s *Scheduler) ResumeTask(taskID string) (*models.Task, error) {
+	var originalType string
+	_ = s.db.QueryRow(`SELECT type FROM tasks WHERE id=?`, taskID).Scan(&originalType)
+	if originalType == "guided_capture" {
+		return nil, fmt.Errorf("restart guided runs from the capture page to review request approval and scope")
+	}
 	var targetID, status, modulesJSON, completedJSON string
 	var priority int
 	err := s.db.QueryRow(`
@@ -1206,6 +1221,10 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// queued but before it started — don't run it.
 	if taskStatus == "cancelled" {
 		s.logger.Info("Skipping cancelled task", "task_id", taskID)
+		return
+	}
+	if taskType == "guided_capture" {
+		s.executeGuidedTask(ctx, taskID, targetID, scopeOverride)
 		return
 	}
 

@@ -14,7 +14,7 @@ func parseRawRequest(raw []byte, absoluteURL string) (Request, error) {
 	if len(raw) == 0 {
 		return Request{}, fmt.Errorf("request message is empty")
 	}
-	r, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(raw)))
+	r, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(normalizeBurpHTTPVersion(raw, false))))
 	if err != nil {
 		return Request{}, fmt.Errorf("invalid raw request: %w", err)
 	}
@@ -40,7 +40,7 @@ func parseRawRequest(raw []byte, absoluteURL string) (Request, error) {
 
 func parseRawResponse(raw []byte, request Request) (Response, error) {
 	dummy, _ := http.NewRequest(request.Method, request.URL, nil)
-	r, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(raw)), dummy)
+	r, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(normalizeBurpHTTPVersion(raw, true))), dummy)
 	if err != nil {
 		return Response{}, fmt.Errorf("invalid raw response: %w", err)
 	}
@@ -53,6 +53,27 @@ func parseRawResponse(raw []byte, request Request) (Response, error) {
 		Status: r.StatusCode, HTTPVersion: r.Proto, Headers: flattenHeaders(r.Header, ""),
 		Body: body, MimeType: r.Header.Get("Content-Type"),
 	}, nil
+}
+
+// Burp renders HTTP/2 messages as textual HTTP with an abbreviated version.
+// Only normalize the start-line token; headers and payload remain byte-exact.
+func normalizeBurpHTTPVersion(raw []byte, response bool) []byte {
+	end := bytes.IndexByte(raw, '\n')
+	if end < 0 {
+		return raw
+	}
+	first := string(raw[:end])
+	for _, version := range []string{"HTTP/2", "HTTP/3"} {
+		if response && strings.HasPrefix(first, version+" ") {
+			first = version + ".0" + first[len(version):]
+			break
+		}
+		if !response && strings.HasSuffix(strings.TrimSuffix(first, "\r"), " "+version) {
+			first = strings.Replace(first, " "+version, " "+version+".0", 1)
+			break
+		}
+	}
+	return append([]byte(first), raw[end:]...)
 }
 
 func flattenHeaders(h http.Header, host string) []Header {

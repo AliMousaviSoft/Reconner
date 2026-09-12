@@ -24,8 +24,9 @@ import (
 // query string (GET), form body (POST), or JSON body. This is what lets the
 // scanner cover POST forms and JSON APIs, not just GET params.
 type insertionPoint struct {
-	URL   string
-	Param string
+	guidedOccurrence int
+	URL              string
+	Param            string
 	// Value is the value discovered for this exact insertion point. Active
 	// detectors must mutate the real value instead of silently replacing every
 	// parameter with "1": doing the latter changes UUID/string/date lookups to a
@@ -269,6 +270,13 @@ func semanticRouteIdentity(ip insertionPoint) (string, bool) {
 // the `limit` budget is spent on real, distinct attack surface rather than value
 // variants or analytics params.
 func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, limit int) []insertionPoint {
+	if g := guidedFrom(ctx); g != nil {
+		var out []insertionPoint
+		for _, p := range g.points {
+			out = append(out, p.ip)
+		}
+		return out
+	}
 	if limit <= 0 {
 		limit = 1000000
 	}
@@ -375,6 +383,9 @@ func loadInsertionPoints(ctx context.Context, db *database.DB, targetID string, 
 // class matches are ordered first; fallback controls how many unfamiliar names
 // are retained so new framework conventions do not become silent blind spots.
 func loadRoutedInsertionPoints(ctx context.Context, db *database.DB, targetID string, class VulnClass, limit, fallback int) []insertionPoint {
+	if guidedFrom(ctx) != nil {
+		return loadInsertionPoints(ctx, db, targetID, limit)
+	}
 	if limit <= 0 {
 		limit = 1000000
 	}
@@ -583,6 +594,9 @@ func loadAuthHeaders(ctx context.Context, db *database.DB, targetID string) map[
 // buildInjectedRequest constructs an *http.Request with `param` set to `value`
 // in the correct location for the insertion point's method/content-type.
 func buildInjectedRequest(ctx context.Context, ip insertionPoint, value string, auth map[string]string) (*http.Request, error) {
+	if g := guidedFrom(ctx); g != nil {
+		return g.injected(ctx, ip, value, "")
+	}
 	method := strings.ToUpper(ip.Method)
 	if method == "" {
 		method = "GET"

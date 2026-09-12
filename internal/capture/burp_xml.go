@@ -45,6 +45,7 @@ func ParseBurpXML(raw []byte) ([]Exchange, error) {
 	if len(raw) > MaxImportBytes {
 		return nil, ErrImportTooLarge
 	}
+	raw = stripStandardBurpDTD(raw)
 	lower := bytes.ToLower(raw)
 	if bytes.Contains(lower, []byte("<!doctype")) || bytes.Contains(lower, []byte("<!entity")) {
 		return nil, ErrUnsafeXML
@@ -86,6 +87,49 @@ func ParseBurpXML(raw []byte) ([]Exchange, error) {
 		return nil, errors.New("Burp XML contains no HTTP items")
 	}
 	return out, nil
+}
+
+// Burp Save items includes this static schema. Accept only this exact schema
+// (ignoring whitespace), never arbitrary DTDs or entity declarations.
+const standardBurpDTD = `<!DOCTYPE items [
+<!ELEMENT items (item*)>
+<!ATTLIST items burpVersion CDATA "">
+<!ATTLIST items exportTime CDATA "">
+<!ELEMENT item (time, url, host, port, protocol, method, path, extension, request, status, responselength, mimetype, response, comment)>
+<!ELEMENT time (#PCDATA)>
+<!ELEMENT url (#PCDATA)>
+<!ELEMENT host (#PCDATA)>
+<!ATTLIST host ip CDATA "">
+<!ELEMENT port (#PCDATA)>
+<!ELEMENT protocol (#PCDATA)>
+<!ELEMENT method (#PCDATA)>
+<!ELEMENT path (#PCDATA)>
+<!ELEMENT extension (#PCDATA)>
+<!ELEMENT request (#PCDATA)>
+<!ATTLIST request base64 (true|false) "false">
+<!ELEMENT status (#PCDATA)>
+<!ELEMENT responselength (#PCDATA)>
+<!ELEMENT mimetype (#PCDATA)>
+<!ELEMENT response (#PCDATA)>
+<!ATTLIST response base64 (true|false) "false">
+<!ELEMENT comment (#PCDATA)>
+]>`
+
+func stripStandardBurpDTD(raw []byte) []byte {
+	start := bytes.Index(raw, []byte("<!DOCTYPE"))
+	if start < 0 {
+		return raw
+	}
+	end := bytes.Index(raw[start:], []byte("]>"))
+	if end < 0 {
+		return raw
+	}
+	end += start + 2
+	if strings.Join(strings.Fields(string(raw[start:end])), " ") != strings.Join(strings.Fields(standardBurpDTD), " ") {
+		return raw
+	}
+	out := append([]byte(nil), raw[:start]...)
+	return append(out, raw[end:]...)
 }
 
 func decodeBurpMessage(m burpMessage) ([]byte, error) {

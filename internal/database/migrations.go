@@ -83,6 +83,8 @@ func RunMigrations(db *DB) error {
 		createCaptureSessionsTable,
 		createRequestTemplatesTable,
 		createCapturedResponsesTable,
+		createGuidedRunsTable,
+		createCaptureAuditTable,
 		createCandidatesTable,
 		alterNucleiFindingsAddVerification,
 		alterNucleiFindingsAddConfidence,

@@ -53,8 +53,7 @@ func BuildPreview(exchanges []Exchange, inScope func(string) bool) Preview {
 			ResponseBytes: len(ex.Response.Body), Accepted: inScope(ex.Request.URL),
 			SuggestedTests: SuggestedTests(ex.Request),
 		}
-		method := strings.ToUpper(ex.Request.Method)
-		item.AutoEligible = item.Accepted && (method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions)
+		item.AutoEligible = item.Accepted && SafeAutomaticReplay(ex.Request)
 		p.Total++
 		if item.Accepted {
 			p.Accepted++
@@ -78,6 +77,13 @@ func BuildPreview(exchanges []Exchange, inScope func(string) bool) Preview {
 		p.Items = append(p.Items, item)
 	}
 	return p
+}
+
+// A GET can still log out, delete or purchase. Both method and intent matter.
+func SafeAutomaticReplay(r Request) bool {
+	m := strings.ToUpper(r.Method)
+	k := OperationKind(r)
+	return (m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions) && (k == "read_only" || k == "query_like")
 }
 
 func SuggestedTests(r Request) []string {

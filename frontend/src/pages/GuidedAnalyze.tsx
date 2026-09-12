@@ -3,8 +3,14 @@ import { captures, targets as targetsApi, type CapturePreview } from '../lib/api
 import type { Target } from '../types'
 import { Badge, Button, EmptyState, Spinner } from '../components/ui'
 import { useUIStore } from '../store/ui'
+import GuidedCorpus from '../components/GuidedCorpus'
 
-const sourceFor = (file: File | null) => file?.name.toLowerCase().endsWith('.xml') ? 'burp_xml' : 'reconner_json'
+const sourceFor = async (file: File) => {
+  const prefix = (await file.slice(0, 4096).text()).trimStart()
+  if (prefix.startsWith('<')) return 'burp_xml'
+  if (prefix.startsWith('{')) return 'reconner_json'
+  throw new Error('Unsupported capture file. Choose Burp XML or Reconner capture JSON.')
+}
 
 export default function GuidedAnalyze() {
   const [targets, setTargets] = useState<Target[]>([])
@@ -39,7 +45,7 @@ export default function GuidedAnalyze() {
     if (!file || !targetId) { addToast('error', 'Choose a project and capture file'); return }
     setBusy(commit ? 'import' : 'preview')
     try {
-      const source = sourceFor(file)
+      const source = await sourceFor(file)
       if (commit) {
         const result = await captures.import(targetId, file, source, identity.trim(), label.trim())
         setPreview(result.preview)
@@ -66,6 +72,10 @@ export default function GuidedAnalyze() {
     finally { setPreflighting(false) }
   }
 
+  // Selecting a file now visibly processes it; import and active traffic remain
+  // separate explicit actions. Inputs are locked during this short preview.
+  useEffect(() => { if (file && targetId) void submit(false) }, [file, targetId])
+
   return (
     <div className="space-y-5 max-w-[1500px] mx-auto">
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
@@ -75,16 +85,19 @@ export default function GuidedAnalyze() {
 
       <section className="card p-4 sm:p-5 space-y-4">
         <div className="grid md:grid-cols-2 gap-4">
-          <label><span className="label">Project</span><select className="input" value={targetId} onChange={e => { setTargetId(e.target.value); setPreview(null); setCaptureId(''); setPreflight(null) }}><option value="">Choose project…</option>{targets.map(t => <option key={t.id} value={t.id}>{t.name || t.domain}</option>)}</select></label>
-          <label><span className="label">Capture file</span><input className="input file:mr-3 file:text-xs file:bg-transparent file:border-0 file:text-accent" type="file" accept=".xml,.json,application/xml,application/json" onChange={e => { setFile(e.target.files?.[0] || null); setPreview(null); setCaptureId(''); setPreflight(null) }}/></label>
-          <label><span className="label">Identity</span><input className="input" value={identity} maxLength={80} onChange={e => setIdentity(e.target.value)} placeholder="User A / User B / Admin"/></label>
-          <label><span className="label">Capture label</span><input className="input" value={label} maxLength={120} onChange={e => setLabel(e.target.value)} placeholder="Checkout → invoice flow"/></label>
+          <label><span className="label">Project</span><select className="input" disabled={!!busy || preflighting} value={targetId} onChange={e => { setTargetId(e.target.value); setPreview(null); setCaptureId(''); setPreflight(null) }}><option value="">Choose project…</option>{targets.map(t => <option key={t.id} value={t.id}>{t.name || t.domain}</option>)}</select></label>
+          <label><span className="label">Capture file (XML / JSON, with or without extension)</span><input className="input file:mr-3 file:text-xs file:bg-transparent file:border-0 file:text-accent" type="file" disabled={!!busy || preflighting} onChange={e => { setFile(e.target.files?.[0] || null); setPreview(null); setCaptureId(''); setPreflight(null) }}/></label>
+          <label><span className="label">Identity</span><input className="input" disabled={!!busy || preflighting} value={identity} maxLength={80} onChange={e => setIdentity(e.target.value)} placeholder="User A / User B / Admin"/></label>
+          <label><span className="label">Capture label</span><input className="input" disabled={!!busy || preflighting} value={label} maxLength={120} onChange={e => setLabel(e.target.value)} placeholder="Checkout → invoice flow"/></label>
         </div>
         <div className="rounded-lg border border-border bg-surface-3/40 p-3 text-xs text-text-secondary">
           Burp: select in-scope HTTP history items and use <b>Save items</b> as XML. Chrome: load the bundled DevTools extension and export <code>reconner-capture/v1</code> JSON. Preview and import never replay traffic.
         </div>
-        <div className="flex flex-wrap gap-2"><Button variant="primary" loading={busy === 'preview'} disabled={!file || !targetId || !!busy} onClick={() => submit(false)}>Preview & build map</Button><Button loading={busy === 'import'} disabled={!preview || !!busy} onClick={() => submit(true)}>Seal & import corpus</Button></div>
+        {file && <p role="status" className="text-xs text-accent">Selected: {file.name} · {(file.size / 1048576).toFixed(1)} MiB. Preview runs automatically; use the preview button to retry, then import the requests to save them.</p>}
+        <div className="flex flex-wrap gap-2"><Button variant="primary" loading={busy === 'preview'} disabled={!file || !targetId || !!busy} onClick={() => submit(false)}>Re-run preview</Button><Button loading={busy === 'import'} disabled={!file || !targetId || !!busy} onClick={() => submit(true)}>Import requests</Button></div>
       </section>
+
+      {targetId && <GuidedCorpus key={targetId} targetId={targetId} importedId={captureId}/>}
 
       {!preview ? <EmptyState title="No capture analyzed yet" description="Choose a Burp XML or Reconner Chrome JSON file. The first pass is local, passive, scope-checked and redacted."/> : <>
         <section className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2">

@@ -34,7 +34,7 @@ func (h *Handler) handlePreviewCapture(w http.ResponseWriter, r *http.Request) {
 		exchanges[i].IdentityLabel = identityLabel
 	}
 	preview := capture.BuildPreview(exchanges, func(u string) bool {
-		return h.inScope(mux.Vars(r)["id"], u)
+		return scanner.GuidedURLInScope(r.Context(), h.db, mux.Vars(r)["id"], u)
 	})
 	h.writeSuccess(w, map[string]any{
 		"preview": preview, "identity_id": identityID, "identity_label": identityLabel,
@@ -58,7 +58,7 @@ func (h *Handler) handleImportCapture(w http.ResponseWriter, r *http.Request) {
 	for i := range exchanges {
 		exchanges[i].IdentityLabel = identityLabel
 	}
-	preview := capture.BuildPreview(exchanges, func(u string) bool { return h.inScope(targetID, u) })
+	preview := capture.BuildPreview(exchanges, func(u string) bool { return scanner.GuidedURLInScope(r.Context(), h.db, targetID, u) })
 	if preview.Accepted == 0 {
 		h.writeError(w, http.StatusBadRequest, "capture has no in-scope HTTP exchanges")
 		return
@@ -96,14 +96,21 @@ func (h *Handler) handleImportCapture(w http.ResponseWriter, r *http.Request) {
 		if preview.Items[i].OperationKind == "read_only" || preview.Items[i].OperationKind == "query_like" {
 			policy = "proof_only"
 		}
-		shapeHash := keyedCaptureHash(h.cfg.SessionSecret, capture.RequestShapeBytes(ex.Request))
+		// Different credentials or business values are distinct contracts. Only
+		// byte-identical decoded requests may collapse inside this import.
+		shapeHash := keyedCaptureHash(h.cfg.SessionSecret, reqJSON)
+		sealedReq, sealedResp := box.Encrypt(string(reqJSON)), box.Encrypt(string(respJSON))
+		if !strings.HasPrefix(sealedReq, "enc:v1:") || !strings.HasPrefix(sealedResp, "enc:v1:") {
+			h.writeError(w, http.StatusInternalServerError, "capture encryption failed")
+			return
+		}
 		res, execErr := tx.ExecContext(r.Context(), `INSERT OR IGNORE INTO request_templates
 			(id,target_id,capture_session_id,identity_id,method,norm_url,content_type,operation_kind,
 			 request_shape_hash,encrypted_request,redacted_preview,replay_policy,source,sequence)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			templateID, targetID, captureID, identityID, ex.Request.Method,
 			scanner.NormalizeURL(capture.SafeDisplayURL(ex.Request.URL)), ex.Request.MimeType, preview.Items[i].OperationKind,
-			shapeHash, box.Encrypt(string(reqJSON)), string(previewJSON), policy, ex.Source, ex.Sequence)
+			shapeHash, sealedReq, string(previewJSON), policy, ex.Source, ex.Sequence)
 		if execErr != nil {
 			h.writeError(w, http.StatusInternalServerError, "failed to seal request template")
 			return
@@ -119,7 +126,7 @@ func (h *Handler) handleImportCapture(w http.ResponseWriter, r *http.Request) {
 			(id,request_template_id,status,content_type,body_hash,encrypted_response,redacted_preview,response_len,timing_ms)
 			VALUES (?,?,?,?,?,?,?,?,?)`, uuid.New().String(), templateID, ex.Response.Status,
 			ex.Response.MimeType, keyedCaptureHash(h.cfg.SessionSecret, ex.Response.Body),
-			box.Encrypt(string(respJSON)), string(respPreview), len(ex.Response.Body), ex.Response.TimeMS)
+			sealedResp, string(respPreview), len(ex.Response.Body), ex.Response.TimeMS)
 		if execErr != nil {
 			h.writeError(w, http.StatusInternalServerError, "failed to seal captured response")
 			return
@@ -211,7 +218,9 @@ func (h *Handler) handlePreflightCapture(w http.ResponseWriter, r *http.Request)
 	}
 	selected := map[string]bool{}
 	for _, id := range request.TemplateIDs {
-		selected[strings.TrimSpace(id)] = true
+		if id = strings.TrimSpace(id); id != "" {
+			selected[id] = true
+		}
 	}
 
 	rows, err := h.db.QueryContext(r.Context(), `SELECT rt.id,rt.method,rt.encrypted_request,
@@ -219,7 +228,8 @@ func (h *Handler) handlePreflightCapture(w http.ResponseWriter, r *http.Request)
 		FROM request_templates rt JOIN capture_sessions cs ON cs.id=rt.capture_session_id
 		LEFT JOIN captured_responses cr ON cr.request_template_id=rt.id
 		WHERE rt.capture_session_id=? AND rt.target_id=? AND cs.target_id=?
-		ORDER BY rt.sequence LIMIT 101`, captureID, targetID, targetID)
+		AND (cs.expires_at IS NULL OR cs.expires_at>datetime('now'))
+		ORDER BY rt.sequence`, captureID, targetID, targetID)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "failed to load capture templates")
 		return
@@ -232,23 +242,30 @@ func (h *Handler) handlePreflightCapture(w http.ResponseWriter, r *http.Request)
 	templates := []sealedTemplate{}
 	for rows.Next() {
 		var t sealedTemplate
-		if rows.Scan(&t.id, &t.method, &t.encRequest, &t.capturedStatus, &t.capturedCT, &t.encResponse, &t.identityID) == nil {
-			if len(selected) == 0 || selected[t.id] {
-				templates = append(templates, t)
-			}
+		if err := rows.Scan(&t.id, &t.method, &t.encRequest, &t.capturedStatus, &t.capturedCT, &t.encResponse, &t.identityID); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "failed to decode capture templates")
+			return
 		}
+		if len(selected) == 0 || selected[t.id] {
+			templates = append(templates, t)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to load capture templates")
+		return
 	}
 	if len(templates) == 0 {
 		h.writeError(w, http.StatusNotFound, "capture or selected templates not found")
 		return
 	}
+	rows.Close()
 	if len(templates) > 100 {
 		h.writeError(w, http.StatusBadRequest, "preflight is limited to 100 templates per run")
 		return
 	}
 
 	box := secret.New(h.cfg.SessionSecret)
-	scanCtx := scanner.WithTargetRequestIdentity(r.Context(), h.db, h.cfg, targetID)
+	scanCtx := r.Context()
 	identities := scanner.LoadIdentities(scanCtx, h.db, targetID, box)
 	identityByID := map[string]*scanner.Identity{}
 	for i := range identities {
@@ -265,14 +282,20 @@ func (h *Handler) handlePreflightCapture(w http.ResponseWriter, r *http.Request)
 		}
 		result := capturePreflightResult{TemplateID: t.id, Method: t.method, Route: capture.SafeDisplayURL(capturedRequest.URL), CapturedStatus: t.capturedStatus}
 		method := strings.ToUpper(strings.TrimSpace(capturedRequest.Method))
-		if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
-			result.Status, result.Reason = "blocked", "automatic preflight permits only GET, HEAD and OPTIONS"
+		if !capture.SafeAutomaticReplay(capturedRequest) {
+			result.Status, result.Reason = "blocked", "preflight permits only non-sensitive GET, HEAD and OPTIONS"
 			results = append(results, result)
 			blocked++
 			continue
 		}
-		if !h.inScope(targetID, capturedRequest.URL) {
+		if !scanner.GuidedURLInScope(r.Context(), h.db, targetID, capturedRequest.URL) {
 			result.Status, result.Reason = "blocked", "request is no longer in target scope"
+			results = append(results, result)
+			blocked++
+			continue
+		}
+		if t.identityID != "" && identityByID[t.identityID] == nil {
+			result.Status, result.Reason = "blocked", "bound identity is unavailable"
 			results = append(results, result)
 			blocked++
 			continue
@@ -297,7 +320,7 @@ func (h *Handler) handlePreflightCapture(w http.ResponseWriter, r *http.Request)
 			ctMatch := mediaTypeBase(replayed.CT) == mediaTypeBase(t.capturedCT) || t.capturedCT == ""
 			bodyMatch := len(capturedResponse.Body) == 0 || scanner.BodyHash(replayed.Response.Body) == scanner.BodyHash(string(capturedResponse.Body))
 			result.BaselineMatch = statusMatch && ctMatch && bodyMatch
-			if result.BaselineMatch {
+			if result.BaselineMatch && replayed.Status >= 200 && replayed.Status < 300 {
 				result.Status, result.Reason = "ready", "status, content type and stable body fingerprint match"
 				matched++
 			} else {
@@ -306,9 +329,10 @@ func (h *Handler) handlePreflightCapture(w http.ResponseWriter, r *http.Request)
 				failed++
 			}
 		}
-		_, _ = h.db.ExecContext(r.Context(), `UPDATE request_templates SET preflight_status=?,preflight_http_status=?,preflight_reason=?,preflight_at=CURRENT_TIMESTAMP WHERE id=? AND target_id=?`,
-			result.Status, result.HTTPStatus, result.Reason, t.id, targetID)
 		results = append(results, result)
+	}
+	for _, result := range results {
+		_, _ = h.db.ExecContext(r.Context(), `UPDATE request_templates SET preflight_status=?,preflight_http_status=?,preflight_reason=?,preflight_at=CURRENT_TIMESTAMP WHERE id=? AND target_id=?`, result.Status, result.HTTPStatus, result.Reason, result.TemplateID, targetID)
 	}
 	h.writeSuccess(w, map[string]any{
 		"capture_id": captureID, "results": results, "ready": matched, "blocked": blocked,

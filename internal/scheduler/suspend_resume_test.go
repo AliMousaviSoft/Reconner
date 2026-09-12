@@ -154,3 +154,27 @@ func TestResumeInterruptedNothingLeft(t *testing.T) {
 		t.Fatalf("task count=%d, want 1 (no empty resume spawned)", count)
 	}
 }
+
+func TestInterruptedGuidedRunRequiresFreshApprovalAndClearsTargetPause(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id,domain,scan_status) VALUES ('guided-target','example.com','paused')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO tasks (id,target_id,type,status,modules,total)
+		VALUES ('guided-task','guided-target','guided_capture','interrupted',?,1)`, models.StringSliceToJSON([]string{"xss"})); err != nil {
+		t.Fatal(err)
+	}
+	if resumed := s.ResumeInterrupted(); resumed != 0 {
+		t.Fatalf("guided task resumed without fresh approval: %d", resumed)
+	}
+	var taskStatus, targetStatus string
+	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id='guided-task'`).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT scan_status FROM targets WHERE id='guided-target'`).Scan(&targetStatus); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "cancelled" || targetStatus != "idle" {
+		t.Fatalf("guided restart state task=%q target=%q", taskStatus, targetStatus)
+	}
+}

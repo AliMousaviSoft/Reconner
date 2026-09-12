@@ -6,7 +6,7 @@ import "time"
 
 const (
 	MaxImportBytes  = 32 << 20 // 32 MiB per uploaded capture
-	MaxMessageBytes = 2 << 20  // 2 MiB per request or response
+	MaxMessageBytes = 8 << 20  // 8 MiB per request or response; total import remains 32 MiB
 	MaxItems        = 5000
 )
 

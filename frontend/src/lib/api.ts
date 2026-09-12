@@ -148,6 +148,12 @@ export interface CapturePreview {
   items: CapturePreviewItem[]
 }
 
+export interface CapturedRequest { method: string; url: string; http_version?: string; headers: { name: string; value: string }[]; body: string | null; mime_type: string }
+export interface GuidedFinding { type: string; parameter: string; severity: string; verdict: string; evidence: string; payload: string; test_case?: CapturedRequest; finding_id?: string }
+export interface GuidedReport { results?: { template_id: string; module: string; status: string; reason: string; requests: number; findings: GuidedFinding[] }[]; manual_modules?: Record<string, string> }
+export interface GuidedRun { id: string; task_id: string; status: string; report: GuidedReport; created_at: string }
+export interface CaptureTemplate { id: string; method: string; route: string; kind: string; preflight_status: string; version: string }
+
 function captureForm(file: File, source: string, identityLabel: string, label: string) {
   const form = new FormData()
   form.append('file', file)
@@ -158,6 +164,13 @@ function captureForm(file: File, source: string, identityLabel: string, label: s
 }
 
 export const captures = {
+	remove: (targetId: string, captureId: string) => req<{ deleted: boolean }>(`/targets/${targetId}/captures/${captureId}`, { method: 'DELETE' }),
+	templates: (targetId: string, captureId: string) => req<CaptureTemplate[]>(`/targets/${targetId}/captures/${captureId}/templates`),
+	reveal: (targetId: string, captureId: string, id: string) => req<{ request: CapturedRequest; version: string }>(`/targets/${targetId}/captures/${captureId}/templates/${id}/reveal`, { method: 'POST' }),
+	edit: (targetId: string, captureId: string, id: string, request: CapturedRequest, version: string) => req<{ version: string }>(`/targets/${targetId}/captures/${captureId}/templates/${id}`, { method: 'PUT', body: JSON.stringify({ request, version }) }),
+	analyze: (targetId: string, captureId: string, template_ids: string[], modules: string[], allow_unsafe: boolean) => req<{ run_id: string; task_id: string }>(`/targets/${targetId}/captures/${captureId}/analyze`, { method: 'POST', body: JSON.stringify({ template_ids, modules, allow_unsafe, confirm_active: true }) }),
+	runs: (targetId: string, captureId: string) => req<GuidedRun[]>(`/targets/${targetId}/captures/${captureId}/runs`),
+	revealReport: (targetId: string, captureId: string, id: string) => req<GuidedReport>(`/targets/${targetId}/captures/${captureId}/runs/${id}/reveal`, { method: 'POST' }),
   preview: (targetId: string, file: File, source: string, identityLabel: string, label: string) =>
     req<{ preview: CapturePreview; passive: boolean; traffic_sent: number }>(`/targets/${targetId}/captures/preview`, {
       method: 'POST', headers: {}, body: captureForm(file, source, identityLabel, label),
