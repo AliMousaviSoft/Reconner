@@ -155,6 +155,11 @@ export interface GuidedRun { id: string; task_id: string; status: string; report
 export interface GuidedOpportunity { module: string; parameter: string; location: string; confidence: number; reason: string; payloads?: string[]; automated: boolean }
 export interface GuidedCheck { template_id: string; module: string }
 export interface CaptureTemplate { id: string; method: string; route: string; kind: string; preflight_status: string; version: string; suggestions: GuidedOpportunity[] }
+export interface CapturePreflight {
+  capture_id: string; ready: number; blocked: number; failed_or_stale: number
+  requests_sent: number; mutations_sent: number; mode: string
+  results: { template_id: string; method: string; route: string; status: string; http_status: number; captured_status: number; baseline_match: boolean; reason: string; timing_ms: number }[]
+}
 
 function captureForm(file: File, source: string, identityLabel: string, label: string) {
   const form = new FormData()
@@ -166,14 +171,14 @@ function captureForm(file: File, source: string, identityLabel: string, label: s
 }
 
 export const captures = {
-	remove: (targetId: string, captureId: string) => req<{ deleted: boolean }>(`/targets/${targetId}/captures/${captureId}`, { method: 'DELETE' }),
-	templates: (targetId: string, captureId: string) => req<CaptureTemplate[]>(`/targets/${targetId}/captures/${captureId}/templates`),
-	reveal: (targetId: string, captureId: string, id: string) => req<{ request: CapturedRequest; version: string }>(`/targets/${targetId}/captures/${captureId}/templates/${id}/reveal`, { method: 'POST' }),
-	edit: (targetId: string, captureId: string, id: string, request: CapturedRequest, version: string) => req<{ version: string }>(`/targets/${targetId}/captures/${captureId}/templates/${id}`, { method: 'PUT', body: JSON.stringify({ request, version }) }),
-	analyze: (targetId: string, captureId: string, template_ids: string[], modules: string[], allow_unsafe: boolean) => req<{ run_id: string; task_id: string }>(`/targets/${targetId}/captures/${captureId}/analyze`, { method: 'POST', body: JSON.stringify({ template_ids, modules, allow_unsafe, confirm_active: true }) }),
-	analyzeChecks: (targetId: string, captureId: string, checks: GuidedCheck[], allow_unsafe: boolean) => req<{ run_id: string; task_id: string }>(`/targets/${targetId}/captures/${captureId}/analyze`, { method: 'POST', body: JSON.stringify({ checks, allow_unsafe, confirm_active: true }) }),
-	runs: (targetId: string, captureId: string) => req<GuidedRun[]>(`/targets/${targetId}/captures/${captureId}/runs`),
-	revealReport: (targetId: string, captureId: string, id: string) => req<GuidedReport>(`/targets/${targetId}/captures/${captureId}/runs/${id}/reveal`, { method: 'POST' }),
+  remove: (targetId: string, captureId: string) => req<{ deleted: boolean }>(`/targets/${targetId}/captures/${captureId}`, { method: 'DELETE' }),
+  templates: (targetId: string, captureId: string) => req<CaptureTemplate[]>(`/targets/${targetId}/captures/${captureId}/templates`),
+  reveal: (targetId: string, captureId: string, id: string) => req<{ request: CapturedRequest; version: string }>(`/targets/${targetId}/captures/${captureId}/templates/${id}/reveal`, { method: 'POST' }),
+  edit: (targetId: string, captureId: string, id: string, request: CapturedRequest, version: string) => req<{ version: string }>(`/targets/${targetId}/captures/${captureId}/templates/${id}`, { method: 'PUT', body: JSON.stringify({ request, version }) }),
+  analyze: (targetId: string, captureId: string, template_ids: string[], modules: string[], allow_unsafe: boolean) => req<{ run_id: string; task_id: string }>(`/targets/${targetId}/captures/${captureId}/analyze`, { method: 'POST', body: JSON.stringify({ template_ids, modules, allow_unsafe, confirm_active: true }) }),
+  analyzeChecks: (targetId: string, captureId: string, checks: GuidedCheck[], allow_unsafe: boolean) => req<{ run_id: string; task_id: string }>(`/targets/${targetId}/captures/${captureId}/analyze`, { method: 'POST', body: JSON.stringify({ checks, allow_unsafe, confirm_active: true }) }),
+  runs: (targetId: string, captureId: string) => req<GuidedRun[]>(`/targets/${targetId}/captures/${captureId}/runs`),
+  revealReport: (targetId: string, captureId: string, id: string) => req<GuidedReport>(`/targets/${targetId}/captures/${captureId}/runs/${id}/reveal`, { method: 'POST' }),
   preview: (targetId: string, file: File, source: string, identityLabel: string, label: string) =>
     req<{ preview: CapturePreview; passive: boolean; traffic_sent: number }>(`/targets/${targetId}/captures/preview`, {
       method: 'POST', headers: {}, body: captureForm(file, source, identityLabel, label),
@@ -183,11 +188,7 @@ export const captures = {
       method: 'POST', headers: {}, body: captureForm(file, source, identityLabel, label),
     }),
   list: (targetId: string) => req<{ id: string; source: string; identity_label: string; label: string; status: string; imported: number; accepted: number; rejected: number; created_at: string; expires_at: string }[]>(`/targets/${targetId}/captures`),
-  preflight: (targetId: string, captureId: string) => req<{
-    capture_id: string; ready: number; blocked: number; failed_or_stale: number
-    requests_sent: number; mutations_sent: number; mode: string
-    results: { template_id: string; method: string; route: string; status: string; http_status: number; captured_status: number; baseline_match: boolean; reason: string; timing_ms: number }[]
-  }>(`/targets/${targetId}/captures/${captureId}/preflight`, { method: 'POST', body: JSON.stringify({}) }),
+  preflight: (targetId: string, captureId: string, templateIds: string[] = []) => req<CapturePreflight>(`/targets/${targetId}/captures/${captureId}/preflight`, { method: 'POST', body: JSON.stringify({ template_ids: templateIds }) }),
 }
 
 export interface BountyProgramList {
