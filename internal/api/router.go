@@ -18,15 +18,22 @@ import (
 )
 
 type Handler struct {
-	db      *database.DB
-	hub     *websocket.Hub
-	sched   *scheduler.Scheduler
-	cfg     *config.Config
-	logger  *logger.Logger
-	auth    *auth.Auth
-	updates *releaseChecker
-	bounty  *bounty.Service
+	db       *database.DB
+	hub      *websocket.Hub
+	sched    *scheduler.Scheduler
+	cfg      *config.Config
+	logger   *logger.Logger
+	auth     *auth.Auth
+	updates  *releaseChecker
+	bounty   *bounty.Service
+	telegram *TelegramBot
 }
+
+// SetTelegramBot attaches the runtime after the handler exists. The bot needs
+// the handler's target-management primitives, while the router needs the bot's
+// settings API, so construction is deliberately two-phase to avoid duplicate
+// controller implementations.
+func (h *Handler) SetTelegramBot(bot *TelegramBot) { h.telegram = bot }
 
 // NewHandler builds the single API runtime used by both the HTTP router and the
 // raw OOB listener. Keeping one handler instance ensures every inbound callback
@@ -201,6 +208,13 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/system/stats", h.requireAuth(h.handleSystemStats)).Methods("GET")
 	api.HandleFunc("/system/update-templates", h.requireAuth(h.handleUpdateNucleiTemplates)).Methods("POST")
 	api.HandleFunc("/system/update-check", h.requireAuth(h.handleUpdateCheck)).Methods("GET")
+	api.HandleFunc("/system/telegram", h.requireAdmin(h.handleGetTelegram)).Methods("GET")
+	api.HandleFunc("/system/telegram", h.requireAdmin(h.handleUpdateTelegram)).Methods("PATCH")
+	api.HandleFunc("/system/telegram/chats", h.requireAdmin(h.handleAddTelegramChat)).Methods("POST")
+	api.HandleFunc("/system/telegram/chats/{chat}", h.requireAdmin(h.handleUpdateTelegramChat)).Methods("PATCH")
+	api.HandleFunc("/system/telegram/chats/{chat}", h.requireAdmin(h.handleDeleteTelegramChat)).Methods("DELETE")
+	api.HandleFunc("/system/telegram/chats/{chat}/test", h.requireAdmin(h.handleTestTelegramChat)).Methods("POST")
+	api.HandleFunc("/system/telegram/retry", h.requireAdmin(h.handleRetryTelegram)).Methods("POST")
 	api.HandleFunc("/notifications", h.requireAuth(h.handleListNotifications)).Methods("GET")
 	api.HandleFunc("/notifications/read", h.requireAuth(h.handleMarkNotificationsRead)).Methods("POST")
 

@@ -151,10 +151,11 @@ var AllModules = []string{
 
 // Notifier is implemented by the Telegram bot to receive scan/vuln events.
 type Notifier interface {
-	NotifyScanStarted(domain string)
-	NotifyScanFinished(domain, status string, duration time.Duration, stats map[string]int)
-	NotifyNewVuln(domain, vulnType, severity, url, parameter string)
-	NotifyMonitorChange(domain, changeType, url, oldVal, newVal string)
+	NotifyScanStarted(taskID, targetID, domain string)
+	NotifyPhaseFinished(taskID, targetID, domain, phase, status string, duration time.Duration, progress, total int)
+	NotifyScanFinished(taskID, targetID, domain, status string, duration time.Duration, stats map[string]int)
+	NotifyNewVuln(findingID, targetID, domain, vulnType, severity, url, parameter string)
+	NotifyMonitorChange(targetID, domain, changeType, url, oldVal, newVal string)
 }
 
 type Scheduler struct {
@@ -303,17 +304,33 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 func (s *Scheduler) BountyCatalog() *bounty.Service { return s.bountyCatalog }
 
 // broadcastAndScore forwards every event to the websocket hub and, for new
-// vuln findings, pushes a Telegram alert only when the finding is high-signal
-// (high/critical, or a takeover). Low/info findings stay in the dashboard only,
-// avoiding alert fatigue.
+// vuln findings, pushes a Telegram alert after confirming that the event maps to
+// a surfaced finding. Per-chat preferences own alert volume; the scheduler must
+// not silently hide a valid low/medium finding from Telegram.
 func (s *Scheduler) broadcastAndScore(event string, data any) {
 	s.hub.Broadcast(event, data)
 
-	if event != "new_vuln_finding" || s.notifier == nil {
+	if s.notifier == nil {
 		return
 	}
 	m, ok := data.(map[string]any)
 	if !ok {
+		return
+	}
+	if event == "notification_created" {
+		targetID, _ := m["target_id"].(string)
+		changeType, _ := m["type"].(string)
+		if targetID == "" {
+			return
+		}
+		var domain, rawURL, oldVal, newVal string
+		_ = s.db.QueryRow(`SELECT domain FROM targets WHERE id=?`, targetID).Scan(&domain)
+		_ = s.db.QueryRow(`SELECT COALESCE(url,''),COALESCE(body,'') FROM notifications
+			WHERE target_id=? AND type=? ORDER BY created_at DESC LIMIT 1`, targetID, changeType).Scan(&rawURL, &newVal)
+		s.notifier.NotifyMonitorChange(targetID, domain, changeType, rawURL, oldVal, newVal)
+		return
+	}
+	if event != "new_vuln_finding" {
 		return
 	}
 	targetID, _ := m["target_id"].(string)
@@ -324,26 +341,17 @@ func (s *Scheduler) broadcastAndScore(event string, data any) {
 		return
 	}
 
-	// Look up severity + domain (payload doesn't carry them).
-	var severity, domain string
-	_ = s.db.QueryRow(`SELECT severity FROM vuln_findings WHERE target_id=? AND type=? AND url=? ORDER BY created_at DESC LIMIT 1`,
-		targetID, vulnType, url).Scan(&severity)
-	_ = s.db.QueryRow(`SELECT domain FROM targets WHERE id=?`, targetID).Scan(&domain)
-
-	if !shouldPushVuln(vulnType, severity) {
+	// Look up the authoritative projection. Detector-only candidates never have
+	// status='finding', so they cannot escape through this notification path.
+	var findingID, severity, domain string
+	if err := s.db.QueryRow(`SELECT id,severity FROM vuln_findings
+		WHERE target_id=? AND type=? AND url=? AND COALESCE(parameter,'')=?
+		  AND COALESCE(status,'finding')='finding' AND COALESCE(triage,'')<>'false_positive'
+		ORDER BY created_at DESC LIMIT 1`, targetID, vulnType, url, param).Scan(&findingID, &severity); err != nil {
 		return
 	}
-	s.notifier.NotifyNewVuln(domain, vulnType, severity, url, param)
-}
-
-// shouldPushVuln decides whether a finding is worth an immediate alert.
-func shouldPushVuln(vulnType, severity string) bool {
-	switch strings.ToLower(severity) {
-	case "critical", "high":
-		return true
-	}
-	// Always push takeovers regardless of stored severity.
-	return vulnType == "subdomain_takeover" || vulnType == "open_bucket"
+	_ = s.db.QueryRow(`SELECT domain FROM targets WHERE id=?`, targetID).Scan(&domain)
+	s.notifier.NotifyNewVuln(findingID, targetID, domain, vulnType, severity, url, param)
 }
 
 // EmitVulnFinding broadcasts a vuln-finding event through the same scoring +
@@ -1391,9 +1399,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	`, targetID)
 
 	s.hub.Broadcast("task_started", map[string]string{"task_id": taskID, "target_id": targetID})
-	backgroundWatch := taskType == monitorWatchType || taskType == monitorEscalationType
-	if s.notifier != nil && !backgroundWatch {
-		s.notifier.NotifyScanStarted(target.Domain)
+	if s.notifier != nil {
+		s.notifier.NotifyScanStarted(taskID, targetID, target.Domain)
 	}
 
 	logFn := func(level, module, message string) {
@@ -1527,6 +1534,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 
 		// Register a per-phase context so the operator can SKIP just this phase and
 		// only a phase that stops making forward progress can exhaust the watchdog.
+		phaseStartedAt := time.Now()
 		modCtx, finishPhase := s.beginPhase(ctx, taskID, watchdog)
 
 		// Parallel fast-path: run all not-yet-handled modules in the SAME group
@@ -1542,13 +1550,21 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				logFn("info", "scheduler", fmt.Sprintf("Running %d modules in parallel: %v", len(group), group))
 				var wg sync.WaitGroup
 				var gmu sync.Mutex
+				type phaseResult struct {
+					module   string
+					err      error
+					duration time.Duration
+				}
+				results := make([]phaseResult, 0, len(group))
 				for _, gm := range group {
 					wg.Add(1)
 					go func(m string) {
 						defer wg.Done()
+						started := time.Now()
 						err := runPlannedModule(modCtx, m)
 						gmu.Lock()
 						defer gmu.Unlock()
+						results = append(results, phaseResult{module: m, err: err, duration: time.Since(started)})
 						if err != nil && ctx.Err() == nil && modCtx.Err() == nil {
 							logFn("error", m, fmt.Sprintf("Module failed: %v", err))
 							taskErr = err
@@ -1561,6 +1577,22 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 				}
 				wg.Wait()
 				skipped, timedOut := finishPhase()
+				if s.notifier != nil {
+					for _, result := range results {
+						phaseStatus := "completed"
+						switch {
+						case timedOut:
+							phaseStatus = "timed_out"
+						case skipped:
+							phaseStatus = "skipped"
+						case ctx.Err() != nil:
+							phaseStatus = "cancelled"
+						case result.err != nil:
+							phaseStatus = "failed"
+						}
+						s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, result.module, phaseStatus, result.duration, len(completedModules), len(modules))
+					}
+				}
 				if skipped {
 					logFn("warn", "scheduler", fmt.Sprintf("Phase group %v SKIPPED by operator — continuing to next phase.", group))
 				}
@@ -1577,6 +1609,24 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 
 		err := runPlannedModule(modCtx, module)
 		skipped, timedOut := finishPhase()
+		if s.notifier != nil {
+			phaseStatus := "completed"
+			switch {
+			case timedOut:
+				phaseStatus = "timed_out"
+			case skipped:
+				phaseStatus = "skipped"
+			case ctx.Err() != nil:
+				phaseStatus = "cancelled"
+			case err != nil:
+				phaseStatus = "failed"
+			}
+			phaseProgress := len(completedModules)
+			if err == nil && !skipped && !timedOut {
+				phaseProgress++
+			}
+			s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, module, phaseStatus, time.Since(phaseStartedAt), phaseProgress, len(modules))
+		}
 		if timedOut {
 			taskErr = fmt.Errorf("phase %q exceeded its %s watchdog and was stopped; completed results were saved", module, watchdog)
 			logFn("error", "scheduler", taskErr.Error())
@@ -1659,8 +1709,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 
 	logFn("info", "scheduler", fmt.Sprintf("Task %s completed with status: %s", taskID, finalStatus))
 
-	if s.notifier != nil && (finalStatus == "finished" || finalStatus == "failed") && !backgroundWatch {
-		go s.notifyScanDone(targetID, target.Domain, finalStatus, startedAt)
+	if s.notifier != nil && finalStatus != InterruptedStatus {
+		// Persist the terminal alert before the task goroutine exits. Keeping this
+		// synchronous prevents shutdown from closing the database between task
+		// completion and outbox insertion.
+		s.notifyScanDone(taskID, targetID, target.Domain, finalStatus, startedAt)
 	}
 	if taskType == monitorWatchType && finalStatus == "failed" {
 		// Persist a durable warning, but let due scheduling retry after its short
@@ -1886,7 +1939,7 @@ func (s *Scheduler) escalateIfChanged(targetID, domain string, baselineSubs int,
 		"new_subdomains", newSubs, "changes", changes)
 	if s.notifier != nil {
 		summary := fmt.Sprintf("%d new subdomain(s), %d change(s) — scheduling change-specific verification", newSubs, changes)
-		s.notifier.NotifyMonitorChange(domain, "new-asset", summary, "", "")
+		s.notifier.NotifyMonitorChange(targetID, domain, "new-asset", summary, "", "")
 	}
 
 	// Build a selective follow-up from the actual diff. A changed JS seed needs
@@ -2275,22 +2328,27 @@ func (s *Scheduler) monitorMemory() {
 	}
 }
 
-func (s *Scheduler) notifyScanDone(targetID, domain, status string, startedAt time.Time) {
+func (s *Scheduler) notifyScanDone(taskID, targetID, domain, status string, startedAt time.Time) {
 	duration := time.Since(startedAt)
-	var subdomains, alive, vulns, nuclei, backups int
+	var subdomains, alive, vulns, nuclei, backups, redirects, jsFindings int
 	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id=?", targetID).Scan(&subdomains)
 	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id=? AND is_alive=1", targetID).Scan(&alive)
-	s.db.QueryRow("SELECT COUNT(*) FROM vuln_findings WHERE target_id=?", targetID).Scan(&vulns)
-	s.db.QueryRow("SELECT COUNT(*) FROM nuclei_findings WHERE target_id=? AND COALESCE(verification,'unverified') != 'rejected'", targetID).Scan(&nuclei)
+	s.db.QueryRow("SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND COALESCE(status,'finding')='finding' AND COALESCE(triage,'')<>'false_positive'", targetID).Scan(&vulns)
+	s.db.QueryRow("SELECT COUNT(*) FROM nuclei_findings WHERE target_id=? AND verification='verified'", targetID).Scan(&nuclei)
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_findings WHERE target_id=?", targetID).Scan(&backups)
+	s.db.QueryRow("SELECT COUNT(*) FROM open_redirect_findings WHERE target_id=? AND verified=1 AND COALESCE(status,'finding')='finding'", targetID).Scan(&redirects)
+	s.db.QueryRow("SELECT COUNT(*) FROM js_findings WHERE target_id=? AND verified=1", targetID).Scan(&jsFindings)
 	stats := map[string]int{
 		"subdomains": subdomains,
 		"alive":      alive,
 		"vulns":      vulns,
 		"nuclei":     nuclei,
 		"backups":    backups,
+		"redirects":  redirects,
+		"js":         jsFindings,
+		"verified":   vulns + nuclei + backups + redirects + jsFindings,
 	}
-	s.notifier.NotifyScanFinished(domain, status, duration, stats)
+	s.notifier.NotifyScanFinished(taskID, targetID, domain, status, duration, stats)
 }
 
 func (s *Scheduler) monitoringScheduler() {

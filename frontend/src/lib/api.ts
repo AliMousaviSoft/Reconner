@@ -276,6 +276,18 @@ export const tasks = {
 
 export interface ApiKeyState { name: string; label: string; hint: string; set: boolean; masked: string }
 
+export type TelegramRole = 'viewer' | 'operator' | 'admin'
+export interface TelegramChat {
+  id: string; chat_id: string; label: string; role: TelegramRole; enabled: boolean
+  notify_scan_started: boolean; notify_phase_finished: boolean; notify_scan_finished: boolean
+  notify_findings: boolean; notify_monitoring: boolean; created_at: string; updated_at: string
+}
+export interface TelegramState {
+  configured: boolean; enabled: boolean; masked_token: string; bot_username: string
+  connected: boolean; last_error: string; last_connected_at: string
+  pending: number; failed: number; chats: TelegramChat[]
+}
+
 export interface ToolCatalogEntry {
   name: string; installed: boolean; method: string; command: string
   doc: string; notes: string; one_click: boolean
@@ -296,6 +308,16 @@ export const system = {
   getSettings: () => req<{ api_keys: ApiKeyState[] }>('/system/settings'),
   updateSettings: (patch: Record<string, string>) =>
     req<{ api_keys: ApiKeyState[] }>('/system/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
+  telegram: () => req<TelegramState>('/system/telegram'),
+  updateTelegram: (patch: { bot_token?: string; enabled?: boolean }) =>
+    req<TelegramState>('/system/telegram', { method: 'PATCH', body: JSON.stringify(patch) }),
+  addTelegramChat: (chat: { chat_id: string; label: string; role: TelegramRole }) =>
+    req<TelegramChat>('/system/telegram/chats', { method: 'POST', body: JSON.stringify(chat) }),
+  updateTelegramChat: (id: string, patch: Partial<Omit<TelegramChat, 'id' | 'chat_id' | 'created_at' | 'updated_at'>>) =>
+    req<TelegramState>(`/system/telegram/chats/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteTelegramChat: (id: string) => req<{ message: string }>(`/system/telegram/chats/${id}`, { method: 'DELETE' }),
+  testTelegramChat: (id: string) => req<{ message: string }>(`/system/telegram/chats/${id}/test`, { method: 'POST' }),
+  retryTelegram: () => req<{ message: string }>('/system/telegram/retry', { method: 'POST' }),
 }
 
 export interface UpdateInfo {
