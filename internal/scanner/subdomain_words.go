@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -65,7 +66,11 @@ func (s *SubdomainScanner) deepDNSWords(ctx context.Context, domain string, know
 		words = append(words, w)
 	}
 
-	for _, w := range bruteWords {
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	for _, w := range LoadCorpus(corpusDir, "subdomain", bruteWords) {
 		add(w)
 	}
 	for _, w := range devToolWords {
@@ -156,8 +161,5 @@ func validDNSPrefix(prefix string) bool {
 }
 
 func itoaSmall(n int) string {
-	if n == 10 {
-		return "10"
-	}
-	return string(rune('0' + n))
+	return strconv.Itoa(n)
 }

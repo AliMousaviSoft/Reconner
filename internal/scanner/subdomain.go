@@ -448,7 +448,7 @@ func probeVhost(ctx context.Context, scheme, ip, host string) (vhostProbe, bool)
 	}
 	dialer := &net.Dialer{Timeout: 6 * time.Second}
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- vhost discovery must probe authorized hosts with invalid/mismatched certificates
 		DialContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
 			return dialer.DialContext(dialCtx, network, targetAddr)
 		},
@@ -527,7 +527,11 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 		seen[h] = true
 		candidates = append(candidates, h)
 	}
-	for _, p := range vhostWordlist {
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	for _, p := range LoadCorpus(corpusDir, "vhost", vhostWordlist) {
 		add(p + "." + domain)
 	}
 	for _, p := range devToolWords {
@@ -915,7 +919,11 @@ func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain stri
 	logFn("info", "subdomain_enum", "Starting active brute-force + permutation...")
 
 	candidates := make(map[string]bool)
-	for _, w := range bruteWords {
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	for _, w := range LoadCorpus(corpusDir, "subdomain", bruteWords) {
 		candidates[w+"."+domain] = true
 	}
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -123,6 +125,7 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/targets/bulk-delete", h.requireAuth(h.handleBulkDeleteTarget)).Methods("POST")
 	api.HandleFunc("/targets/import", h.requireAuth(h.handleImportTargets)).Methods("POST")
 	api.HandleFunc("/targets/{id}/export", h.requireAuth(h.handleExportTarget)).Methods("GET")
+	api.HandleFunc("/targets/{id}/artifacts.zip", h.requireAuth(h.handleTargetArtifacts)).Methods("GET")
 	api.HandleFunc("/targets/{id}/scan", h.requireAuth(h.handleStartScan)).Methods("POST")
 	api.HandleFunc("/targets/{id}/assets", h.requireAuth(h.handleListAssets)).Methods("GET")
 	api.HandleFunc("/targets/{id}/assets", h.requireAuth(h.handleAddAsset)).Methods("POST")
@@ -193,6 +196,7 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/tasks/{id}/cancel", h.requireAuth(h.handleCancelTask)).Methods("POST")
 	api.HandleFunc("/tasks/{id}/resume", h.requireAuth(h.handleResumeTask)).Methods("POST")
 	api.HandleFunc("/tasks/{id}/logs", h.requireAuth(h.handleGetTaskLogs)).Methods("GET")
+	api.HandleFunc("/tasks/{id}/phases", h.requireAuth(h.handleGetTaskPhases)).Methods("GET")
 
 	// Global search
 	api.HandleFunc("/search", h.requireAuth(h.handleSearch)).Methods("GET")
@@ -205,6 +209,9 @@ func (h *Handler) Router() http.Handler {
 	// System
 	api.HandleFunc("/system/settings", h.requireAuth(h.handleGetSettings)).Methods("GET")
 	api.HandleFunc("/system/settings", h.requireAuth(h.handleUpdateSettings)).Methods("PATCH")
+	api.HandleFunc("/system/corpora", h.requireAdmin(h.handleListCorpora)).Methods("GET")
+	api.HandleFunc("/system/corpora/{category}", h.requireAdmin(h.handleMergeCorpus)).Methods("POST")
+	api.HandleFunc("/system/corpora/{category}/custom", h.requireAdmin(h.handleRestoreCorpus)).Methods("DELETE")
 	api.HandleFunc("/system/stats", h.requireAuth(h.handleSystemStats)).Methods("GET")
 	api.HandleFunc("/system/update-templates", h.requireAuth(h.handleUpdateNucleiTemplates)).Methods("POST")
 	api.HandleFunc("/system/update-check", h.requireAuth(h.handleUpdateCheck)).Methods("GET")
@@ -247,9 +254,20 @@ func (h *Handler) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
+			// The dashboard and API are served from one origin. Reflecting an
+			// arbitrary Origin together with credentials would let an attacker
+			// origin read authenticated API responses. Accept an explicit Origin
+			// only when its authority is the request Host; non-browser clients that
+			// omit Origin continue to work normally.
+			u, err := url.Parse(origin)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || !strings.EqualFold(u.Host, r.Host) {
+				h.writeError(w, http.StatusForbidden, "cross-origin request denied")
+				return
+			}
+			w.Header().Add("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-CSRF-Token")
 		}
 		if r.Method == "OPTIONS" {
@@ -337,10 +355,15 @@ func (h *Handler) targetOwnerID(targetID string) (int64, bool) {
 // targetScopeMiddleware enforces per-user data isolation: every /api/targets/{id}
 // route (all of which use {id} as the target id) is reachable only by the target's
 // owner or an administrator. Non-owners get 403 — a member can neither see nor act
-// on another member's scans. Routes without an {id} var pass straight through and
-// are scoped in their own list queries instead.
+// on another member's scans. Other resource routes also use a variable named {id}
+// (notably /tasks/{id}); they must pass through to their resource-specific owner
+// check instead of treating a task id as though it were a target id.
 func (h *Handler) targetScopeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/targets/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		tid := mux.Vars(r)["id"]
 		if tid == "" {
 			next.ServeHTTP(w, r)
@@ -406,7 +429,19 @@ func (h *Handler) serveSPA(dir string) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "text/html")
+		// Vite copies public files (favicon, manifest, robots.txt) to the dist
+		// root rather than /assets. Serve a real root file when present; only
+		// client-side application routes should fall back to index.html.
+		rel := strings.TrimPrefix(filepath.Clean(path), string(filepath.Separator))
+		if rel != "." && rel != "" && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+			filePath := filepath.Join(dir, rel)
+			if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+				http.ServeFile(w, r, filePath)
+				return
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
 	}
 }
