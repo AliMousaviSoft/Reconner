@@ -159,7 +159,7 @@ Release. This prevents users from seeing an update before its image exists.
 ### v3 stability contract
 
 The v3 work freezes the existing feature surface and treats correctness as a
-release artifact, not a slogan. Every one of the 42 supported scheduler modules
+release artifact, not a slogan. Every one of the 43 supported scheduler modules
 has a declared prerequisite, proof contract and regression-suite owner. A phase
 can finish as `completed`, `blocked`, `failed`, `timed_out`, `skipped`,
 `cancelled`, `unsupported` or `unknown`; a missing tool, credential, identity,
@@ -230,9 +230,9 @@ Opening a program loads its current structured scope. Select the assets you want
 and create a Project, or create a Project manually from domains, wildcards,
 exact URLs/pages, JavaScript files and APIs. Exact page and JS assets are seeded
 directly into their relevant analysis pipeline instead of being reduced to a
-hostname. IP/CIDR assets remain visible when imported from a provider or an old
-database, but this stability release rejects network execution instead of
-pretending an unsupported scan succeeded.
+hostname. IP, CIDR and inclusive IP-range assets use the explicit network
+profiles documented below; network modules never run as a side effect of a web
+scan.
 
 Program scope remains controlled by the operator:
 
@@ -271,6 +271,21 @@ Reconner includes:
 
 Reconner's XSS pipeline focuses on **reflected XSS and DOM XSS**. It does not
 run stored-XSS injection as part of the general scan pipeline.
+
+The v3.4 pipeline expands context-selected browser proof across HTML/SVG,
+attribute, JavaScript/template, URL, raw-text and nested `srcdoc` sinks. Its
+state-aware crawler inventories same-origin frames, shadow roots, forms, hash
+routes, tabs and disclosure widgets without auto-clicking generic mutation
+buttons. Modern static and streaming `*HTMLUnsafe` APIs, tag-name-derived data,
+storage sources and Trusted Types-adjacent flows feed the browser verifier. It
+stays bounded: only vectors appropriate to the observed context are tried, and
+a finding still requires a fresh nonce to execute in Chromium.
+
+Every task phase now exposes a coverage ledger—discovered, eligible, attempted,
+candidate, confirmed, rejected, blocked and errored counts. These are execution
+facts rather than a claim that an unattempted surface is clean. Rendered browser
+states are persisted in the target export so a scan's client-side reach can be
+reviewed and compared between releases.
 
 Static JavaScript source-to-sink analysis is routing intelligence, not proof. It
 stays internal until Chromium observes a nonce payload execute; only then does a
@@ -326,6 +341,33 @@ tokens. Promotion requires two stable denied controls and two identical
 successful replays with materially different protected content. The detector
 does not guess usernames, passwords, or tokens. See the local-only matrix in
 [v3.3.1 authentication-header bypass evidence](docs/V3_3_1_AUTH_HEADER_BYPASS_EVIDENCE.md).
+
+Reconner v3.4 adds a standalone **File upload validation** module.
+It consumes scoped multipart plus structured/nested/flat JSON upload shapes and
+covers PHP, JSP/JSPX, ASP/ASPX, ColdFusion, SSI and CGI extension families;
+multi-extension/filter/ADS-style bypasses; MIME mismatches; GIF polyglots;
+server-side renames; stored SVG execution; SVG/MVG image-processing callbacks;
+ZIP/TAR traversal; DOCX/XLSX/PPTX external entities; and `.htaccess` /
+`web.config` handler changes. Upload acceptance alone is never a finding: promotion requires
+an independently retrieved execution marker, Chromium proof, a token-attributed
+OOB callback, or retrieval of a traversed archive member outside the upload
+directory. Bundled Nuclei checks also gain stricter false-positive matchers and
+format-specific AWS, Composer, npm and Subversion exposure templates. All
+regression fixtures are in-process loopback servers; no external asset is
+contacted. See [v3.4 release notes](docs/V3_4_0_RELEASE_NOTES.md).
+
+Target details also include an **Admin & sensitive panels** inventory. Product
+fingerprints, credential forms and authorization responses are grouped by
+normalized content or redirect destination, so one shared console across many
+subdomains appears once with an expandable list of all affected URLs. Generic
+path-only responses are excluded. The target's orange finding total now counts
+only actionable medium, high and critical issues (plus verified open redirects),
+not low/info inventory rows.
+
+Admin-panel redirects are never treated as findings by status alone. Reconner
+follows bounded same-host redirects, fingerprints the final response and stores
+only a verified 2xx login/console or an evidence-backed 401/403 interface. Old
+301/302-only rows are removed automatically during the database migration.
 
 Backup discovery prioritizes contextual nested paths such as `/back/.env`, uses
 bounded Range validation, and retains the complete generic corpus behind those
@@ -390,12 +432,30 @@ Available commands include `/status`, `/targets`, `/target`, `/scans`,
 
 ## Network targets
 
-Direct IP/CIDR/range execution is intentionally unavailable in this release.
-Legacy network projects remain readable and exportable. Both the API and scan
-planner fail closed with a clear unsupported-capability error, so no empty or
-successful-looking phantom scan can be created.
+Network scanning is an explicit profile inside the ordinary project/asset scan
+dialog; it does not add another sidebar section and it never runs as a side
+effect of a web profile. Network assets accept a single IP, CIDR, or inclusive
+range (`192.168.1.1-192.168.1.10`). Mixed projects are scanned one asset at a
+time so web and network modules cannot be accidentally combined.
 
-The frozen prerequisite and proof surface for all 42 supported modules is in
+- **Network fast** uses Naabu TCP-connect discovery over a curated set of
+  high-signal ports (SSH, FTP, Telnet, HTTP/S, SMB, RDP, databases, containers
+  and common admin consoles).
+- **Network normal** covers Naabu's top 1000 ports; **deep** covers all TCP
+  ports. ICMP is never a liveness gate, avoiding missed hosts that drop ping.
+- Nmap fingerprints only verified open ports (`-sV`) and performs bounded OS
+  detection when the runtime capabilities are available. Native TCP/banner and
+  service hints remain as a bounded fallback for small scopes.
+- Recognised CDN/WAF edges and configured out-of-scope IPs/CIDRs are removed
+  before any port request. Nuclei receives only verified services and its
+  network/TCP template families.
+- 401/403 verification reuses Reconner's stable-control bypass engine on
+  discovered web services. HTTP Basic credential auditing is a separate,
+  explicit opt-in: it requires a real Basic challenge, is rate-limited, stops
+  on lockout/429 responses and requires two identical success replays. Its
+  usernames and top-1000 password corpus are managed under Settings → Corpora.
+
+The frozen prerequisite and proof surface for all 43 supported web modules is in
 [the v3 capability matrix](docs/V3_CAPABILITY_MATRIX.md).
 
 ## Toolchain
@@ -405,16 +465,18 @@ published:
 
 | Area | Bundled tools |
 |---|---|
-| Discovery | subfinder, assetfinder, findomain, alterx, asnmap, scilla |
+| Discovery | subfinder, assetfinder, findomain, alterx, asnmap, scilla, naabu |
 | DNS | dnsx, massdns, puredns, shuffledns |
 | HTTP/crawling | httpx, katana, hakrawler, gau, waybackurls, waymore, uro |
 | Content | dirsearch, feroxbuster |
-| Detection | nuclei, subzy, sqlmap |
+| Detection | nuclei, subzy, sqlmap, nmap |
 | Runtime | Chromium, Python 3 and git |
 
-The container receives no `NET_RAW` or `NET_ADMIN` capability. Tool versions
-and downloaded release checksums are pinned so rebuilds cannot silently change
-the scanner stack.
+Compose keeps `NET_RAW` and `NET_ADMIN` in the container capability bounding set
+only for Nmap OS fingerprinting; the Reconner service still runs as uid 10001,
+Naabu uses TCP connect mode, and Nmap alone has matching file capabilities.
+Remove `cap_add` to disable OS fingerprinting while retaining port and service
+discovery. Tool versions and downloaded release checksums are pinned.
 
 ## Configuration
 

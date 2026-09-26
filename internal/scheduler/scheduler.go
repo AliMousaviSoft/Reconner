@@ -58,6 +58,7 @@ const (
 	ModuleIntel           = "intel"
 	ModuleOAST            = "oast"
 	ModuleXXE             = "xxe"
+	ModuleFileUpload      = "file_upload"
 	ModuleIDOR            = "idor"
 	ModuleJWT             = "jwt"
 	ModuleATO             = "ato"
@@ -115,6 +116,7 @@ var AllModules = []string{
 	ModuleIntel,
 	ModuleOAST,
 	ModuleXXE,
+	ModuleFileUpload,
 	ModuleIDOR,
 	ModuleJWT,
 	ModuleAuthz,
@@ -155,6 +157,7 @@ type Scheduler struct {
 	paramFuzzScanner   *scanner.ParamFuzzScanner
 	dirScanner         *scanner.DirScanner
 	nucleiScanner      *scanner.NucleiScanner
+	networkScanner     *scanner.NetworkScanner
 	dastScanner        *scanner.DASTScanner
 	headlessCrawler    *scanner.HeadlessCrawler
 	vulnScanner        *scanner.VulnScanner
@@ -173,6 +176,7 @@ type Scheduler struct {
 	intelScanner       *scanner.IntelScanner
 	oastScanner        *scanner.OASTScanner
 	xxeScanner         *scanner.XXEScanner
+	fileUploadScanner  *scanner.FileUploadScanner
 	idorScanner        *scanner.IDORScanner
 	jwtScanner         *scanner.JWTScanner
 	atoEngine          *scanner.AccountTakeoverEngine
@@ -244,6 +248,7 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.paramFuzzScanner = scanner.NewParamFuzzScanner(db, exec, cfg, log, bc)
 	s.dirScanner = scanner.NewDirScanner(db, exec, cfg, log)
 	s.nucleiScanner = scanner.NewNucleiScanner(db, exec, cfg, log)
+	s.networkScanner = scanner.NewNetworkScanner(db, exec, cfg, log)
 	s.dastScanner = scanner.NewDASTScanner(db, cfg, log, bc)
 	s.headlessCrawler = scanner.NewHeadlessCrawler(db, cfg, log)
 	s.vulnScanner = scanner.NewVulnScanner(db, exec, cfg, log, bc)
@@ -262,6 +267,7 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.intelScanner = scanner.NewIntelScanner(db, exec, cfg, log, bc)
 	s.oastScanner = scanner.NewOASTScanner(db, exec, cfg, log, bc)
 	s.xxeScanner = scanner.NewXXEScanner(db, exec, cfg, log, bc)
+	s.fileUploadScanner = scanner.NewFileUploadScanner(db, exec, cfg, log, bc)
 	s.idorScanner = scanner.NewIDORScanner(db, exec, cfg, log, bc)
 	s.jwtScanner = scanner.NewJWTScanner(db, exec, cfg, log, bc)
 	s.atoEngine = scanner.NewAccountTakeoverEngine(db, exec, cfg, log, bc)
@@ -585,7 +591,8 @@ var ErrInvalidModuleSelection = errors.New("invalid module selection")
 func scanOptionToken(module string) bool {
 	switch module {
 	case "speed_slow", "speed_normal", "speed_fast",
-		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint":
+		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint",
+		"network_fast", "network_normal", "network_deep", "full_ports":
 		return true
 	default:
 		return false
@@ -618,18 +625,22 @@ func applyPlanOptions(modules []string) []string {
 	return out
 }
 
-// unsupportedNetworkToken covers the network controls that older clients and
-// the v2 UI could submit even though this source tree has no network executor.
-// Rejecting them at admission is intentionally strict: a visible error is far
-// safer than the previous finished/0-results task that had performed no scan.
 func unsupportedNetworkToken(module string) bool {
 	switch module {
-	case ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
-		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
-		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports":
+	case ModuleNetworkBackup, ModuleNetworkIngram, ModuleNetDevices,
+		"nuclei_only", "bruteforce", "ingram", "initial_access":
 		return true
 	default:
-		return strings.HasPrefix(module, "network")
+		return false
+	}
+}
+
+func isNetworkModule(module string) bool {
+	switch module {
+	case ModuleNetwork, ModuleNetworkBrute, ModuleNetworkNucleiOnly, ModuleNetworkInitialAccess:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -651,6 +662,7 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 		ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
 		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
 		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports",
+		"network_fast", "network_normal", "network_deep",
 	} {
 		known[token] = true
 	}
@@ -665,7 +677,7 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 			return nil, fmt.Errorf("%w: unsupported module %q", ErrInvalidModuleSelection, module)
 		}
 		if unsupportedNetworkToken(module) {
-			return nil, fmt.Errorf("%w: network scanning is unavailable in this build (%q); no task was created", ErrInvalidModuleSelection, module)
+			return nil, fmt.Errorf("%w: retired network option %q", ErrInvalidModuleSelection, module)
 		}
 		if !seen[module] {
 			seen[module] = true
@@ -689,12 +701,35 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 	if err != nil {
 		return nil, err
 	}
-	var targetKind string
-	if err := s.db.QueryRow(`SELECT COALESCE(kind,'web') FROM targets WHERE id=?`, targetID).Scan(&targetKind); err != nil {
+	var targetKind, targetScope string
+	if err := s.db.QueryRow(`SELECT COALESCE(kind,'web'),domain FROM targets WHERE id=?`, targetID).Scan(&targetKind, &targetScope); err != nil {
 		return nil, fmt.Errorf("target not found: %w", err)
 	}
-	if targetKind == "network" || (targetKind == "mixed" && strings.TrimSpace(scopeOverride) == "") {
-		return nil, fmt.Errorf("%w: this legacy %s project requires the removed network executor; scan an individual web asset or convert it to a web project", ErrInvalidModuleSelection, targetKind)
+	hasNetwork, hasWeb := false, false
+	for _, module := range modules {
+		if isNetworkModule(module) {
+			hasNetwork = true
+			continue
+		}
+		if !strings.HasPrefix(module, "network_") && module != "full_ports" {
+			hasWeb = true
+		}
+	}
+	if hasNetwork {
+		scope := strings.TrimSpace(scopeOverride)
+		if scope == "" {
+			scope = targetScope
+		}
+		if _, err := scanner.ExpandNetworkScope(scope, scanner.MaxNetworkScopeHosts); err != nil {
+			return nil, fmt.Errorf("%w: network modules require a single IP, CIDR, or inclusive IP range: %v", ErrInvalidModuleSelection, err)
+		}
+		if hasWeb {
+			return nil, fmt.Errorf("%w: network and web modules must run as separate explicit scans", ErrInvalidModuleSelection)
+		}
+	} else if targetKind == "network" {
+		return nil, fmt.Errorf("%w: select the Network Scan pipeline for this asset", ErrInvalidModuleSelection)
+	} else if targetKind == "mixed" && strings.TrimSpace(scopeOverride) == "" {
+		return nil, fmt.Errorf("%w: scan mixed projects one asset at a time", ErrInvalidModuleSelection)
 	}
 
 	// Capability planning: a selection of vulnerability OBJECTIVES is expanded into
@@ -1173,7 +1208,7 @@ var expectedTools = []string{
 	// http / crawl / urls
 	"httpx", "gau", "waybackurls", "waymore", "katana", "hakrawler", "uro",
 	// scanning
-	"nuclei", "dirsearch", "feroxbuster",
+	"nuclei", "dirsearch", "feroxbuster", "naabu", "nmap",
 	// takeover
 	"subzy",
 	// active verification
@@ -1408,29 +1443,43 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if scopeOverride != "" {
 		effectiveScope = scopeOverride
 	}
+	sentModules := models.JSONToStringSlice(modulesJSON)
+	networkTask := false
+	for _, module := range sentModules {
+		if isNetworkModule(module) {
+			networkTask = true
+			break
+		}
+	}
 	// Web application scanner: the scope is one or more web hosts. Seed every
 	// explicitly-listed host as a subdomain so the web pipeline (http_probe →
 	// crawl/js/params/dast/nuclei) runs against the EXACT target(s) WITHOUT
 	// requiring subdomain enumeration (which runs only when explicitly selected).
-	webHosts, _ := scanner.SplitScope(effectiveScope)
+	var webHosts []string
+	if !networkTask {
+		webHosts, _ = scanner.SplitScope(effectiveScope)
+	}
 	webPrimary := effectiveScope
 	if len(webHosts) > 0 {
 		webPrimary = webHosts[0]
 	}
 	seeded := webHosts
-	if scopeOverride == "" {
+	if !networkTask && scopeOverride == "" {
 		if managed := s.loadProjectWebSeeds(ctx, targetID); len(managed) > 0 {
 			seeded = managed
 		}
 	}
-	if len(seeded) == 0 && webPrimary != "" {
+	if !networkTask && len(seeded) == 0 && webPrimary != "" {
 		seeded = []string{webPrimary}
 	}
 	// Subdomain enumeration is root-oriented (one domain per Run call), unlike
 	// the DB-reading web modules below. A target-level scan therefore needs an
 	// explicit fan-out list covering every managed asset; passing webPrimary here
 	// used to enumerate only the first asset in a multi-asset target (issue #7).
-	subdomainRoots := s.loadSubdomainRoots(ctx, targetID, effectiveScope, scopeOverride)
+	var subdomainRoots []string
+	if !networkTask {
+		subdomainRoots = s.loadSubdomainRoots(ctx, targetID, effectiveScope, scopeOverride)
+	}
 	// A scope token may be a bare host (example.com) OR a full ENDPOINT URL
 	// (https://x.com/appointment?h=…). Seed the HOST into subdomains so http_probe
 	// covers it, and — for endpoint URLs — register the exact URL + its query/path
@@ -1466,7 +1515,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if scopeOverride != "" {
 		scopeHosts = webHosts
 	}
-	if len(scopeHosts) == 0 && webPrimary != "" {
+	if !networkTask && len(scopeHosts) == 0 && webPrimary != "" {
 		scopeHosts = []string{webPrimary}
 	}
 	if len(scopeHosts) > 0 {
@@ -1480,13 +1529,13 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	if len(webRoots) == 0 {
 		webRoots = normalizeSubdomainRoots([]string{webPrimary})
 	}
-	sentModules := models.JSONToStringSlice(modulesJSON)
 	var modules []string
 	// Honor per-scan behavior options and build the executable phase list.
 	speed := scanner.SpeedNormal
 	subBrute := true        // slow permutation/brute phase of subdomain enum (default on)
 	asnDiscovery := false   // explicit opt-in only after program-scope/WHOIS verification
 	singleEndpoint := false // confine the whole scan to the seed URL(s) and paths under them
+	networkProfile := scanner.NetworkNormal
 	for _, m := range sentModules {
 		switch m {
 		case "speed_slow":
@@ -1503,6 +1552,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			asnDiscovery = false
 		case "single_endpoint":
 			singleEndpoint = true
+		case "network_fast":
+			networkProfile = scanner.NetworkFast
+		case "network_normal":
+			networkProfile = scanner.NetworkNormal
+		case "network_deep", "full_ports":
+			networkProfile = scanner.NetworkDeep
 		default:
 			modules = append(modules, m)
 		}
@@ -1510,6 +1565,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	ctx = scanner.WithWebSpeed(ctx, speed)
 	ctx = scanner.WithSubdomainBrute(ctx, subBrute)
 	ctx = scanner.WithASNDiscovery(ctx, asnDiscovery)
+	ctx = scanner.WithNetworkProfile(ctx, networkProfile)
 	// Single-endpoint mode: confine the pipeline to the seeded endpoint URL(s) and
 	// the paths under them. Also force the slow subdomain brute OFF (there is one
 	// host) and drop subdomain enumeration from the module list — the point is to
@@ -1574,6 +1630,20 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		})
 	}
 	runPlannedModule := func(moduleCtx context.Context, module string) error {
+		moduleCtx = scanner.WithCoverageReporter(moduleCtx, func(metric scanner.CoverageMetric, delta int64) {
+			column := map[scanner.CoverageMetric]string{
+				scanner.CoverageDiscovered: "discovered_count", scanner.CoverageEligible: "eligible_count",
+				scanner.CoverageAttempted: "attempted_count", scanner.CoverageCandidate: "candidate_count",
+				scanner.CoverageConfirmed: "confirmed_count", scanner.CoverageRejected: "rejected_count",
+				scanner.CoverageBlocked: "blocked_count", scanner.CoverageError: "error_count",
+			}[metric]
+			if column == "" || delta <= 0 {
+				return
+			}
+			// column is selected exclusively from the constant map above; values stay
+			// parameterized. SQLite serializes the small atomic phase-ledger updates.
+			_, _ = s.db.Exec(`UPDATE task_phases SET `+column+`=`+column+`+?,updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND module=?`, delta, taskID, module)
+		})
 		switch module {
 		case ModuleSubdomainEnum:
 			return runSubdomainRootFanout(moduleCtx, subdomainRoots, logFn, func(root string) error {
@@ -1630,6 +1700,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		ModuleSSTI:            2,
 		ModuleCmdi:            2,
 		ModuleXXE:             2,
+		ModuleFileUpload:      2,
 		ModuleCachePoison:     2,
 		ModuleRace:            2,
 		ModuleIDOR:            2,
@@ -2182,6 +2253,22 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		}
 	}()
 	switch module {
+	case ModuleNetwork:
+		return s.networkScanner.Run(ctx, targetID, domain, logFn)
+	case ModuleNetworkNucleiOnly:
+		return s.nucleiScanner.RunNetwork(ctx, targetID, domain, logFn)
+	case ModuleNetworkBrute:
+		return s.networkScanner.RunBasicAuth(ctx, targetID, domain, logFn)
+	case ModuleNetworkInitialAccess:
+		ips, expandErr := scanner.ExpandNetworkScope(domain, scanner.MaxNetworkScopeHosts)
+		if expandErr != nil {
+			return expandErr
+		}
+		hosts := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			hosts = append(hosts, ip.String())
+		}
+		return s.vulnScanner.Run403Bypass(scanner.WithHostScope(ctx, hosts), targetID, logFn)
 	case ModuleSubdomainEnum:
 		return s.subdomainScanner.Run(ctx, targetID, domain, logFn)
 	case ModuleHTTPProbe:
@@ -2246,6 +2333,8 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.oastScanner.Run(ctx, targetID, logFn)
 	case ModuleXXE:
 		return s.xxeScanner.Run(ctx, targetID, logFn)
+	case ModuleFileUpload:
+		return s.fileUploadScanner.Run(ctx, targetID, logFn)
 	case ModuleIDOR:
 		return s.idorScanner.Run(ctx, targetID, logFn)
 	case ModuleJWT:
@@ -2261,7 +2350,7 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 	case ModuleOriginIP:
 		return s.originIPScanner.Run(ctx, targetID, logFn)
 	case ModulePortScan:
-		return scanner.BlockedPhase("legacy portscan module is retired; network execution is unavailable")
+		return scanner.BlockedPhase("legacy portscan module is retired; select an explicit Network Fast, Normal, or Deep profile")
 	case ModuleShodan:
 		return s.shodanScanner.Run(ctx, targetID, logFn)
 	case ModuleRace:
@@ -2319,8 +2408,10 @@ func (s *Scheduler) startTaskPhase(taskID, module string) {
 
 func (s *Scheduler) finishTaskPhase(taskID, module, status, reason string, duration time.Duration) {
 	_, _ = s.db.Exec(`UPDATE task_phases SET status=?,reason=?,duration_ms=?,finished_at=CURRENT_TIMESTAMP,
+		blocked_count=blocked_count+CASE WHEN ?='blocked' THEN 1 ELSE 0 END,
+		error_count=error_count+CASE WHEN ?='failed' THEN 1 ELSE 0 END,
 		updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND module=? AND status IN ('pending','running')`,
-		status, reason, duration.Milliseconds(), taskID, module)
+		status, reason, duration.Milliseconds(), status, status, taskID, module)
 }
 
 func (s *Scheduler) terminalTaskPhaseCount(taskID string) int {
@@ -2331,7 +2422,9 @@ func (s *Scheduler) terminalTaskPhaseCount(taskID string) int {
 
 func (s *Scheduler) finishUnresolvedTaskPhases(taskID, status, reason string) {
 	_, _ = s.db.Exec(`UPDATE task_phases SET status=?,reason=?,finished_at=CURRENT_TIMESTAMP,
-		updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND status IN ('pending','running')`, status, reason, taskID)
+		blocked_count=blocked_count+CASE WHEN ?='blocked' THEN 1 ELSE 0 END,
+		error_count=error_count+CASE WHEN ?='failed' THEN 1 ELSE 0 END,
+		updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND status IN ('pending','running')`, status, reason, status, status, taskID)
 }
 
 func (s *Scheduler) unresolvedTaskPhaseCount(taskID string) int {
@@ -2344,18 +2437,28 @@ func (s *Scheduler) updateTargetStats(targetID string) {
 	var subdomainCount, aliveCount, findingCount int
 
 	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id = ?", targetID).Scan(&subdomainCount)
-	s.db.QueryRow("SELECT COUNT(*) FROM subdomains WHERE target_id = ? AND is_alive = 1", targetID).Scan(&aliveCount)
+	s.db.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM subdomains WHERE target_id=? AND is_alive=1) +
+		(SELECT COUNT(*) FROM network_hosts WHERE target_id=? AND is_alive=1)`, targetID, targetID).Scan(&aliveCount)
+	// The orange headline is an actionable vulnerability count, not an inventory
+	// counter. Keep only medium+ findings; exposed-file discovery is promoted into
+	// vuln_findings after validation, so counting backup rows here double-counted
+	// them and made low/info discoveries look like vulnerabilities.
 	// Nuclei is counted by DISTINCT template_id (not raw rows): one template that
 	// fires on hundreds of near-identical URLs is ONE logical finding, so the
 	// headline count reflects real issues instead of duplicated noise (matches the
 	// collapsed nuclei list view).
 	s.db.QueryRow(`
 		SELECT
-			(SELECT COUNT(DISTINCT template_id) FROM nuclei_findings WHERE target_id = ? AND COALESCE(verification,'unverified') != 'rejected') +
-			(SELECT COUNT(*) FROM backup_findings WHERE target_id = ?) +
+			(SELECT COUNT(DISTINCT template_id) FROM nuclei_findings WHERE target_id = ?
+				AND LOWER(COALESCE(severity,'info')) IN ('medium','high','critical')
+				AND COALESCE(verification,'unverified') != 'rejected') +
 			(SELECT COUNT(*) FROM open_redirect_findings WHERE target_id = ? AND COALESCE(status,'finding')='finding') +
-			(SELECT COUNT(*) FROM vuln_findings WHERE target_id = ? AND COALESCE(status,'finding')='finding')
-	`, targetID, targetID, targetID, targetID).Scan(&findingCount)
+			(SELECT COUNT(*) FROM vuln_findings WHERE target_id = ?
+				AND LOWER(COALESCE(severity,'info')) IN ('medium','high','critical')
+				AND COALESCE(status,'finding')='finding'
+				AND COALESCE(triage,'') != 'false_positive')
+	`, targetID, targetID, targetID).Scan(&findingCount)
 
 	_, _ = s.db.Exec(`
 		UPDATE targets SET 

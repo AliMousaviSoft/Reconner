@@ -63,6 +63,7 @@ func TestPlanSingleVulnerabilityExpandsPipeline(t *testing.T) {
 		ModuleSSTI:         {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleNoSQLi:       {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleXXE:          {ModuleHTTPProbe, ModuleParamDiscovery},
+		ModuleFileUpload:   {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleCmdi:         {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleOpenRedirect: {ModuleHTTPProbe, ModuleParamDiscovery},
 		ModuleIDOR:         {ModuleHTTPProbe, ModuleParamDiscovery},
@@ -209,7 +210,7 @@ func TestPlanNetworkPassthrough(t *testing.T) {
 // takeover) must never enumerate subdomains — the scan stays on the seeded host.
 func TestPlanManyDetectorsNoSubdomainEnum(t *testing.T) {
 	sel := []string{
-		ModuleXSS, ModuleSQLi, ModuleSSRF, ModuleLFI, ModuleSSTI, ModuleXXE,
+		ModuleXSS, ModuleSQLi, ModuleSSRF, ModuleLFI, ModuleSSTI, ModuleXXE, ModuleFileUpload,
 		ModuleCmdi, ModuleIDOR, ModuleJWT, ModuleOpenRedirect, ModuleNuclei,
 		ModuleExposure, ModuleIntel, ModulePassive, ModuleCachePoison, ModuleOAST,
 	}
@@ -301,7 +302,7 @@ func TestCreateTaskOptionsDoNotInflateProgressTotal(t *testing.T) {
 	}
 }
 
-func TestCreateTaskRejectsOptionsOnlyAndPhantomNetworkPipeline(t *testing.T) {
+func TestCreateTaskAdmitsExplicitNetworkPipelineOnly(t *testing.T) {
 	s := newTestScheduler(t)
 	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, kind) VALUES ('admission-target','10.0.0.1','network')`); err != nil {
 		t.Fatal(err)
@@ -309,18 +310,21 @@ func TestCreateTaskRejectsOptionsOnlyAndPhantomNetworkPipeline(t *testing.T) {
 	if _, err := s.CreateTask("admission-target", []string{"speed_fast"}, 1); !errors.Is(err, ErrInvalidModuleSelection) {
 		t.Fatalf("options-only task error=%v, want ErrInvalidModuleSelection", err)
 	}
-	if _, err := s.CreateTask("admission-target", []string{ModuleNetwork}, 1); !errors.Is(err, ErrInvalidModuleSelection) {
-		t.Fatalf("phantom network task error=%v, want ErrInvalidModuleSelection", err)
+	if _, err := s.CreateTask("admission-target", []string{ModuleNetwork, "network_fast"}, 1); err != nil {
+		t.Fatalf("explicit network pipeline was rejected: %v", err)
 	}
 	if _, err := s.CreateTask("admission-target", []string{ModuleHTTPProbe}, 1); !errors.Is(err, ErrInvalidModuleSelection) {
 		t.Fatalf("web modules on legacy network project error=%v, want ErrInvalidModuleSelection", err)
+	}
+	if _, err := s.CreateTask("admission-target", []string{ModuleNetworkBackup}, 1); !errors.Is(err, ErrInvalidModuleSelection) {
+		t.Fatalf("retired network submodule error=%v, want ErrInvalidModuleSelection", err)
 	}
 	var count int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE target_id='admission-target'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatalf("rejected task persisted %d row(s)", count)
+	if count != 1 {
+		t.Fatalf("tasks persisted=%d, want only the explicit network task", count)
 	}
 }
 

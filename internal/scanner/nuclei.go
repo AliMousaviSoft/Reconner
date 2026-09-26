@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -297,6 +299,56 @@ func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []str
 	return nil
 }
 
+// RunNetwork feeds the already-verified open service inventory to nuclei's
+// network/TCP templates. It is separate from Run so selecting web nuclei never
+// expands into a port scan and selecting network nuclei never re-crawls the web.
+func (s *NucleiScanner) RunNetwork(ctx context.Context, targetID, rawScope string, logFn LogFunc) error {
+	if s.exec == nil || !s.exec.IsToolAvailable("nuclei") {
+		return BlockedPhase("nuclei binary is unavailable")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT ip,port FROM network_services WHERE target_id=? ORDER BY ip,port`, targetID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var targets []string
+	allowed, err := networkScopeSet(rawScope)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var ip string
+		var port int
+		if rows.Scan(&ip, &port) == nil && allowed[ip] {
+			targets = append(targets, net.JoinHostPort(ip, strconv.Itoa(port)))
+		}
+	}
+	if len(targets) == 0 {
+		return BlockedPhase("no verified open network services for nuclei")
+	}
+	conc, bulk, rate := 100, 80, 300
+	if s.cfg != nil {
+		if s.cfg.Workers.Nuclei > conc {
+			conc = s.cfg.Workers.Nuclei
+		}
+		if s.cfg.NucleiBulkSize > 0 {
+			bulk = s.cfg.NucleiBulkSize
+		}
+		if s.cfg.Limits.HTTPRateLimit > rate {
+			rate = s.cfg.Limits.HTTPRateLimit
+		}
+	}
+	packDir := ""
+	if s.cfg != nil {
+		packDir = materializeReconnerTemplates(s.cfg.DataDir)
+	}
+	var findings atomic.Int64
+	var warned atomic.Bool
+	s.runNucleiProcess(ctx, targetID, targets, []string{"medium", "high", "critical"}, []string{"network", "ssl"}, conc, bulk, rate, packDir, &findings, &warned, logFn)
+	logFn("info", "network_nuclei_only", fmt.Sprintf("Network nuclei complete. Found %d result(s).", findings.Load()))
+	return ctx.Err()
+}
+
 // regroupIntoChunks splits items into at most maxChunks roughly-equal groups,
 // targeting ~chunkSize items per group. A small surface (fits in one chunk)
 // stays a single process — splitting a handful of targets into several tiny
@@ -453,7 +505,6 @@ func (s *NucleiScanner) runNucleiProcess(ctx context.Context, targetID string, t
 		sev := strings.ToLower(out.Info.Severity)
 		actionableSev := !(sev == "info" || sev == "low" || sev == "unknown" || sev == "")
 		typ, _ := classifyNucleiTemplate(out.TemplateID, out.Info.Tags)
-
 		// MISS NOTHING: capture every hit that is either an actionable severity OR
 		// maps to a real vulnerability class as a normalized candidate — even an
 		// info/low template that actually hit a sqli/xss/ssrf/lfi/rce/ssti/redirect
@@ -462,6 +513,15 @@ func (s *NucleiScanner) runNucleiProcess(ctx context.Context, targetID string, t
 		if actionableSev || typ != "nuclei" {
 			_ = StoreCandidate(ctx, s.db,
 				nucleiToCandidate(targetID, out.TemplateID, out.Info.Name, out.Info.Severity, out.MatchedAt, out.Info.Tags))
+		}
+
+		// A behavior template returning only a redirect, auth denial, no-content or
+		// not-found response has not demonstrated injection/execution. Preserve its
+		// normalized candidate for native verification, but never promote the raw
+		// template hit as a finding. Open redirects remain exempt because a 3xx
+		// Location is their actual proof primitive.
+		if nucleiNonEvidenceStatusFP(typ, out.Response) {
+			return
 		}
 
 		// FINDINGS stay HIGH-SIGNAL: skip the info/low tiers unless opted in, and
