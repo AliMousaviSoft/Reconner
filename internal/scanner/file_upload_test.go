@@ -631,6 +631,83 @@ func TestFileUploadAttemptMatrixIsComplete(t *testing.T) {
 	}
 }
 
+// Two SSRF vectors distinct from the pre-existing SVG/MVG image-processing
+// ones: an uploaded HTML file rendered by a preview/PDF pipeline (headless
+// Chromium, wkhtmltopdf) fetches every resource it references, and a DOCX
+// INCLUDEPICTURE field code is fetched by a document-conversion pipeline
+// that resolves field codes — neither requires a version-specific CVE, both
+// are proof-gated exactly like the pre-existing OOB attempts (an attributed
+// callback required; no callback must mean no finding).
+var oobURLPattern = regexp.MustCompile(`https?://[^"'\s<>&]+`)
+
+// oobURLsIn finds every embedded callback URL a simulated vulnerable pipeline
+// would fetch: directly in plain-text/HTML content, or inside any file of a
+// ZIP-based (OOXML) document.
+func oobURLsIn(body []byte) []string {
+	if extracted := unzipLab(body); len(extracted) > 0 {
+		var all []string
+		for _, content := range extracted {
+			all = append(all, oobURLPattern.FindAllString(string(content), -1)...)
+		}
+		return all
+	}
+	return oobURLPattern.FindAllString(string(body), -1)
+}
+
+func TestFileUploadHTMLAndDOCXFieldCodeSSRFRequireAttributedCallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, subtype string
+		match         func(fileUploadAttempt) bool
+	}{
+		{"html-rendering", "image_processing_ssrf", func(a fileUploadAttempt) bool { return a.filename == "recon-oob.html" }},
+		{"docx-field-code", "ooxml_field_code_ssrf", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db, targetID := newFileUploadTestScanner(t)
+			var callbacksEnabled bool
+			callback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if callbacksEnabled {
+					token := path.Base(r.URL.Path)
+					_, _ = db.Exec(`UPDATE oob_probes SET hit_count=hit_count+1,evidence='local attributed callback' WHERE token=?`, token)
+				}
+				fmt.Fprint(w, "ok")
+			}))
+			defer callback.Close()
+			s.cfg.BlindXSSCallbackURL = callback.URL
+			oob, ok := newOOBCapability(s.cfg)
+			if !ok {
+				t.Fatal("local OOB capability unavailable")
+			}
+			var target *httptest.Server
+			target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				filename, _, body := readLabUpload(r)
+				// Simulate the vulnerable pipeline: fetch every OOB-callback-shaped
+				// URL embedded in the uploaded document/HTML, exactly as a real
+				// preview renderer or document converter would.
+				for _, u := range oobURLsIn(body) {
+					resp, _ := http.Get(u) // #nosec G107 -- httptest-only URL
+					if resp != nil {
+						resp.Body.Close()
+					}
+				}
+				writeUploadJSON(w, target.URL+"/uploads/"+filename)
+			}))
+			defer target.Close()
+			ip := multipartPoint(target.URL + "/upload")
+			a := chooseAttempt(t, fileUploadAttempts(oob, true, db, targetID, ip), tc.subtype, tc.match)
+
+			callbacksEnabled = false
+			if got := runLabAttempt(t, s, db, targetID, ip, a); got != 0 {
+				t.Fatalf("no callback arrived yet finding=%d, want 0 (proof-gating must not fire on upload acceptance alone)", got)
+			}
+			callbacksEnabled = true
+			if got := runLabAttempt(t, s, db, targetID, ip, a); got != 1 {
+				t.Fatalf("attributed callback arrived but finding=%d, want 1", got)
+			}
+		})
+	}
+}
+
 // The old magic-byte polyglot was just the literal text "GIF89a" prepended to
 // PHP source — not a real image by any format's actual specification. This
 // proves the replacement is genuinely valid: Go's own stdlib decoder (the
