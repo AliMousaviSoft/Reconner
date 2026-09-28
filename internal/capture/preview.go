@@ -118,6 +118,9 @@ func SuggestedTests(r Request) []string {
 	if strings.Contains(lowerPath, "graphql") {
 		tests["graphql_authz"] = true
 	}
+	if strings.Contains(strings.ToLower(r.MimeType), "multipart/form-data") {
+		tests["file_upload"] = true
+	}
 	out := make([]string, 0, len(tests))
 	for test := range tests {
 		out = append(out, test)

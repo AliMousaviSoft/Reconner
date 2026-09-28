@@ -14,6 +14,7 @@ const sourceFor = async (file: File) => {
 
 const previewTestLabel: Record<string, string> = {
   idor_bola: 'IDOR', sqli: 'SQLi', xss: 'XSS', nosqli: 'NoSQLi', ssrf: 'SSRF', open_redirect: 'Redirect',
+  bac_bfla: 'Access control', graphql_authz: 'GraphQL authz', file_upload: 'File upload', cors: 'CORS',
 }
 
 export default function GuidedAnalyze() {

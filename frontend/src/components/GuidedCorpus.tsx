@@ -105,6 +105,8 @@ export default function GuidedCorpus({ targetId, importedId, onCaptureChange }: 
   const [captureId, setCaptureId] = useState('')
   const [templates, setTemplates] = useState<CaptureTemplate[]>([])
   const [category, setCategory] = useState('')
+  const [selectedTemplateId, setSelectedTemplateId] = useState('')
+  const [requestFilter, setRequestFilter] = useState('')
   const [confirmed, setConfirmed] = useState(false)
   const [unsafe, setUnsafe] = useState(false)
   const [advanced, setAdvanced] = useState(false)
@@ -128,18 +130,6 @@ export default function GuidedCorpus({ targetId, importedId, onCaptureChange }: 
     const leftIndex = moduleOrder.indexOf(left); const rightIndex = moduleOrder.indexOf(right)
     return (leftIndex < 0 ? 999 : leftIndex) - (rightIndex < 0 ? 999 : rightIndex) || left.localeCompare(right)
   }), [candidates])
-  const selectedCandidates = useMemo(() => candidates.filter(candidate => candidate.suggestion.module === category), [candidates, category])
-  const categoryTemplates = useMemo(() => {
-    const ids = new Set<string>()
-    return selectedCandidates.filter(candidate => !ids.has(candidate.template.id) && !!ids.add(candidate.template.id)).map(candidate => candidate.template)
-  }, [selectedCandidates])
-  const automaticCandidates = useMemo(() => candidates.filter(candidate => candidate.suggestion.automated), [candidates])
-  const plannedCandidates = useMemo(() => automaticCandidates.filter(candidate => unsafe || isSafeTemplate(candidate.template)), [automaticCandidates, unsafe])
-  const plannedChecks = useMemo(() => checksFor(plannedCandidates), [plannedCandidates])
-  const plannedTemplates = useMemo(() => new Set(plannedChecks.map(check => check.template_id)).size, [plannedChecks])
-  const active = runs.some(run => ['pending', 'running', 'paused'].includes(run.status))
-  const activeRun = runs.find(run => ['pending', 'running', 'paused'].includes(run.status))
-
   const latestResult = (templateId: string, module: string) => {
     for (const run of runs) {
       const result = run.report.results?.find(row => row.template_id === templateId && row.module === module)
@@ -147,6 +137,32 @@ export default function GuidedCorpus({ targetId, importedId, onCaptureChange }: 
     }
     return undefined
   }
+
+  const requestFilterLower = requestFilter.trim().toLowerCase()
+  const visibleTemplates = useMemo(() => templates.filter(template => !requestFilterLower ||
+    template.route.toLowerCase().includes(requestFilterLower) || template.method.toLowerCase().includes(requestFilterLower)), [templates, requestFilterLower])
+  const sortedTemplates = useMemo(() => [...visibleTemplates].sort((left, right) => {
+    const leftHits = candidates.some(c => c.template.id === left.id && resultPresentation(latestResult(left.id, c.suggestion.module)).label === 'HIT')
+    const rightHits = candidates.some(c => c.template.id === right.id && resultPresentation(latestResult(right.id, c.suggestion.module)).label === 'HIT')
+    if (leftHits !== rightHits) return leftHits ? -1 : 1
+    return left.route.localeCompare(right.route) || left.method.localeCompare(right.method)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [visibleTemplates, candidates, runs])
+  const selectedTemplate = useMemo(() => templates.find(template => template.id === selectedTemplateId), [templates, selectedTemplateId])
+  const selectedTemplateSuggestions = useMemo(() => candidates.filter(candidate => candidate.template.id === selectedTemplateId)
+    .sort((left, right) => {
+      const leftIndex = moduleOrder.indexOf(left.suggestion.module); const rightIndex = moduleOrder.indexOf(right.suggestion.module)
+      return (leftIndex < 0 ? 999 : leftIndex) - (rightIndex < 0 ? 999 : rightIndex)
+    }), [candidates, selectedTemplateId])
+  const selectedTemplateModules = useMemo(() => [...new Set(selectedTemplateSuggestions.map(candidate => candidate.suggestion.module))], [selectedTemplateSuggestions])
+  const selectedTemplateChecks = useMemo(() => selectedTemplate ? checksFor(selectedTemplateSuggestions.filter(candidate =>
+    candidate.suggestion.automated && (unsafe || isSafeTemplate(selectedTemplate)))) : [], [selectedTemplate, selectedTemplateSuggestions, unsafe])
+  const automaticCandidates = useMemo(() => candidates.filter(candidate => candidate.suggestion.automated), [candidates])
+  const plannedCandidates = useMemo(() => automaticCandidates.filter(candidate => unsafe || isSafeTemplate(candidate.template)), [automaticCandidates, unsafe])
+  const plannedChecks = useMemo(() => checksFor(plannedCandidates), [plannedCandidates])
+  const plannedTemplates = useMemo(() => new Set(plannedChecks.map(check => check.template_id)).size, [plannedChecks])
+  const active = runs.some(run => ['pending', 'running', 'paused'].includes(run.status))
+  const activeRun = runs.find(run => ['pending', 'running', 'paused'].includes(run.status))
 
   const resultChecks = checksFor(automaticCandidates)
   const resultStats = resultChecks.reduce((stats, check) => {
@@ -181,6 +197,12 @@ export default function GuidedCorpus({ targetId, importedId, onCaptureChange }: 
   useEffect(() => {
     if (!categories.includes(category)) setCategory(categories[0] || '')
   }, [categories, category])
+
+  useEffect(() => {
+    if (sortedTemplates.some(template => template.id === selectedTemplateId)) return
+    setSelectedTemplateId(sortedTemplates[0]?.id || '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortedTemplates])
 
   useEffect(() => { onCaptureChange?.(captureId) }, [captureId, onCaptureChange])
 
@@ -385,7 +407,6 @@ export default function GuidedCorpus({ targetId, importedId, onCaptureChange }: 
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'reconner-guided-test-cases.json'; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
-  const categoryChecks = checksFor(selectedCandidates.filter(candidate => candidate.suggestion.automated && (unsafe || isSafeTemplate(candidate.template))))
   const editorTemplate = editor ? templates.find(template => template.id === editor.id) : undefined
   const editorNeedsUnsafe = editor ? !['GET', 'HEAD', 'OPTIONS'].includes(editor.request.method.toUpperCase()) || !!editorTemplate && !isSafeTemplate(editorTemplate) : false
 
@@ -402,8 +423,8 @@ export default function GuidedCorpus({ targetId, importedId, onCaptureChange }: 
       <div className="border-b border-border bg-[linear-gradient(120deg,rgba(34,211,238,.09),rgba(20,184,166,.025)_55%,transparent)] p-4 sm:p-5">
         <div className="grid xl:grid-cols-[minmax(0,1fr)_auto] gap-5 items-center">
           <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2"><Badge variant="info">RECOMMENDED</Badge>{preflight ? <Badge variant={preflight.blocked + preflight.failed_or_stale ? 'warning' : 'success'}>{preflight.ready} baselines ready</Badge> : <Badge>baseline pending</Badge>}{active && <Badge variant="info">RUNNING</Badge>}</div>
-            <div><h2 className="text-lg font-semibold">Validate once, then run {plannedChecks.length} relevant checks</h2><p className="text-xs text-text-secondary mt-1 max-w-3xl">Reconner preflights captured GET/HEAD/OPTIONS requests, skips stale sessions, and automatically queues only supported tests. No crawler, redirect following, browser, external tool, or OAST callback is started here.</p></div>
+            <div className="flex flex-wrap items-center gap-2"><Badge variant="info">AUTOMATIC MODE</Badge>{preflight ? <Badge variant={preflight.blocked + preflight.failed_or_stale ? 'warning' : 'success'}>{preflight.ready} baselines ready</Badge> : <Badge>baseline pending</Badge>}{active && <Badge variant="info">RUNNING</Badge>}</div>
+            <div><h2 className="text-lg font-semibold">Test every applicable vulnerability class across every captured request</h2><p className="text-xs text-text-secondary mt-1 max-w-3xl">One click validates live baselines, runs every supported proof ladder across all {sortedTemplates.length} captured requests, and reports hit / no-hit / needs-review per check in the Results tab. Reconner preflights captured GET/HEAD/OPTIONS requests first and skips stale sessions. No crawler, redirect following, browser, external tool, or OAST callback is started here.</p></div>
             <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-text-muted"><span><b className="text-text-primary">{plannedTemplates}</b> requests</span><span><b className="text-text-primary">{plannedChecks.length}</b> checks</span><span><b className="text-text-primary">{categories.length}</b> categories</span><span><b className="text-text-primary">{candidates.length - plannedCandidates.length}</b> manual/guarded signals</span></div>
           </div>
           <div className="xl:w-[360px] space-y-2">
@@ -429,43 +450,58 @@ export default function GuidedCorpus({ targetId, importedId, onCaptureChange }: 
         <button className={`px-3 py-2 text-xs font-medium border-b-2 ${view === 'results' ? 'border-accent text-text-primary' : 'border-transparent text-text-muted hover:text-text-primary'}`} onClick={() => setView('results')}>Results <span className="ml-1 text-[10px]">{runs.length}</span></button>
       </div>
 
-      {view === 'plan' ? <div className="grid lg:grid-cols-[240px_minmax(0,1fr)] min-h-[520px]">
-        <aside className="border-b lg:border-b-0 lg:border-r border-border bg-surface-3/20 p-3">
-          <p className="px-2 pb-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Discovered surfaces</p>
-          <div className="flex lg:block gap-1 overflow-x-auto lg:overflow-visible pb-1 lg:pb-0">{categories.map(module => {
-            const rows = candidates.filter(candidate => candidate.suggestion.module === module)
-            const requestCount = new Set(rows.map(row => row.template.id)).size
-            const hitCount = new Set(rows.filter(row => resultPresentation(latestResult(row.template.id, module)).label === 'HIT').map(row => row.template.id)).size
-            const automated = rows.some(row => row.suggestion.automated)
-            return <button type="button" key={module} onClick={() => setCategory(module)} className={`min-w-40 lg:min-w-0 lg:w-full text-left rounded-lg px-3 py-2.5 mb-1 transition-colors ${category === module ? 'bg-accent/10 text-text-primary ring-1 ring-accent/40' : 'text-text-secondary hover:bg-white/[.03]'}`}>
-              <span className="flex items-center justify-between gap-2"><span className="text-xs font-semibold">{moduleInfo[module]?.short || module}</span>{hitCount ? <Badge variant="error">{hitCount} hit</Badge> : <span className="text-[10px] text-text-muted">{requestCount}</span>}</span>
-              <span className="mt-1 block text-[9px] text-text-muted">{rows.length} signals · {automated ? 'automatic' : 'manual'}</span>
-            </button>
-          })}</div>
+      {view === 'plan' ? <div className="grid lg:grid-cols-[300px_minmax(0,1fr)] min-h-[520px]">
+        <aside className="border-b lg:border-b-0 lg:border-r border-border bg-surface-3/20 flex flex-col">
+          <div className="p-3 pb-2 space-y-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Unique requests <span className="normal-case text-text-muted/70">({sortedTemplates.length})</span></p>
+            <input className="input h-8 text-xs" dir="ltr" placeholder="Filter by method or path…" value={requestFilter} onChange={event => setRequestFilter(event.target.value)}/>
+            <div className="flex flex-wrap gap-1">{categories.map(module => <button type="button" key={module} onClick={() => setCategory(current => current === module ? '' : module)} className={`rounded-full px-2 py-0.5 text-[9px] font-semibold transition-colors ${category === module ? 'bg-accent/20 text-accent ring-1 ring-accent/40' : 'bg-surface-2 text-text-muted hover:text-text-primary'}`}>{moduleInfo[module]?.short || module}</button>)}</div>
+          </div>
+          <div className="flex-1 overflow-y-auto max-h-[560px] px-2 pb-2 space-y-1">
+            {sortedTemplates.filter(template => !category || candidates.some(c => c.template.id === template.id && c.suggestion.module === category)).map(template => {
+              const modules = [...new Set(candidates.filter(c => c.template.id === template.id).map(c => c.suggestion.module))]
+              const signalCount = candidates.filter(c => c.template.id === template.id).length
+              const hitCount = modules.filter(module => resultPresentation(latestResult(template.id, module)).label === 'HIT').length
+              const safe = isSafeTemplate(template)
+              return <button type="button" key={template.id} onClick={() => setSelectedTemplateId(template.id)} className={`w-full text-left rounded-lg px-3 py-2.5 transition-colors ${selectedTemplateId === template.id ? 'bg-accent/10 text-text-primary ring-1 ring-accent/40' : 'text-text-secondary hover:bg-white/[.03]'}`}>
+                <span className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 min-w-0"><Badge variant={safe ? 'success' : 'warning'}>{template.method}</Badge><code className="truncate text-[11px]">{template.route}</code></span>
+                  {hitCount > 0 && <Badge variant="error">{hitCount} hit</Badge>}
+                </span>
+                <span className="mt-1 flex flex-wrap items-center gap-1">{modules.length ? modules.map(module => <span key={module} className="text-[9px] text-text-muted">{moduleInfo[module]?.short || module}</span>) : <span className="text-[9px] text-text-muted">no supported signals</span>}</span>
+                <span className="mt-0.5 block text-[9px] text-text-muted">{signalCount} signal{signalCount === 1 ? '' : 's'} · baseline {template.preflight_status}</span>
+              </button>
+            })}
+            {!sortedTemplates.length && <p className="px-2 py-4 text-center text-[11px] text-text-muted">No requests match this filter.</p>}
+          </div>
         </aside>
 
         <main className="min-w-0 p-3 sm:p-4">
-          {!category ? <EmptyState title="No supported test surface" description="Inspect or recapture requests with parameters, object identifiers, JSON bodies, credentials, or navigation inputs."/> : <div className="space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 pb-1">
-              <div><div className="flex flex-wrap items-center gap-2"><h3 className="text-base font-semibold">{moduleInfo[category]?.title || category}</h3><Badge>{categoryChecks.length ? `${categoryChecks.length} automatic` : 'manual workflow'}</Badge></div><p className="text-xs text-text-muted mt-1">{moduleInfo[category]?.description}</p></div>
-              <Button size="sm" variant="primary" disabled={isBusy || active || !confirmed || categoryChecks.length === 0} onClick={() => runChecks(categoryChecks, moduleInfo[category]?.short || category)}>Run category</Button>
+          {!selectedTemplate ? <EmptyState title="Select a request" description="Choose a captured request on the left to see which tests apply to it and run them."/> : <div className="space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 pb-1 border-b border-border/70">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2"><Badge variant={isSafeTemplate(selectedTemplate) ? 'success' : 'warning'}>{selectedTemplate.method}</Badge><code className="truncate text-sm font-semibold">{selectedTemplate.route}</code></div>
+                <p className="text-xs text-text-muted mt-1">{selectedTemplateSuggestions.length} test{selectedTemplateSuggestions.length === 1 ? '' : 's'} can be run on this request across {selectedTemplateModules.length} categor{selectedTemplateModules.length === 1 ? 'y' : 'ies'} · baseline {selectedTemplate.preflight_status}</p>
+              </div>
+              <Button size="sm" variant="primary" disabled={isBusy || active || !confirmed || selectedTemplateChecks.length === 0} onClick={() => runChecks(selectedTemplateChecks, selectedTemplate.route)}>Run all {selectedTemplateChecks.length || ''} applicable tests →</Button>
             </div>
-            {categoryTemplates.map(template => {
-              const suggestions = selectedCandidates.filter(candidate => candidate.template.id === template.id).map(candidate => candidate.suggestion)
-              const result = latestResult(template.id, category)
+            {!selectedTemplateModules.length ? <EmptyState title="No supported test surface" description="Inspect or recapture this request with parameters, object identifiers, JSON bodies, credentials, or navigation inputs."/> : selectedTemplateModules.map(module => {
+              const suggestions = selectedTemplateSuggestions.filter(candidate => candidate.suggestion.module === module).map(candidate => candidate.suggestion)
+              const result = latestResult(selectedTemplate.id, module)
               const presentation = resultPresentation(result)
-              const safe = isSafeTemplate(template)
-              return <details key={template.id} className="group rounded-xl border border-border bg-surface-3/15">
+              const safe = isSafeTemplate(selectedTemplate)
+              const moduleChecks = checksFor(suggestions.filter(suggestion => suggestion.automated && (safe || unsafe)).map(suggestion => ({ template: selectedTemplate, suggestion })))
+              return <details key={module} open className="group rounded-xl border border-border bg-surface-3/15">
                 <summary className="cursor-pointer list-none p-3 sm:p-4 flex items-center justify-between gap-3">
-                  <span className="min-w-0"><span className="flex items-center gap-2"><Badge variant={safe ? 'success' : 'warning'}>{template.method}</Badge><code className="truncate text-xs text-text-secondary">{template.route}</code></span><span className="mt-1.5 block text-[10px] text-text-muted">{suggestions.length} parameter signal{suggestions.length === 1 ? '' : 's'} · {safe ? 'auto-safe' : 'guarded'} · baseline {template.preflight_status}</span></span>
-                  <span className="flex shrink-0 items-center gap-2"><Badge variant={presentation.variant}>{presentation.label}</Badge><span className="text-text-muted transition-transform group-open:rotate-90">›</span></span>
+                  <span className="min-w-0"><span className="flex items-center gap-2"><h4 className="text-sm font-semibold">{moduleInfo[module]?.title || module}</h4><Badge>{moduleChecks.length ? `${moduleChecks.length} automatic` : 'manual workflow'}</Badge></span><span className="mt-1 block text-[10px] text-text-muted">{moduleInfo[module]?.description}</span></span>
+                  <span className="flex shrink-0 items-center gap-2">{result && <Badge variant={presentation.variant}>{presentation.label}</Badge>}{moduleChecks.length > 0 && <Button size="sm" variant="primary" disabled={isBusy || active || !confirmed} onClick={event => { event.preventDefault(); void runChecks(moduleChecks, moduleInfo[module]?.short || module) }}>Run</Button>}<span className="text-text-muted transition-transform group-open:rotate-90">›</span></span>
                 </summary>
                 <div className="border-t border-border p-3 space-y-2">{suggestions.map((suggestion, index) => {
                   const canRun = suggestion.automated && (safe || unsafe)
                   return <div key={`${suggestion.parameter}-${index}`} className="grid xl:grid-cols-[minmax(0,1fr)_minmax(180px,.55fr)_auto] gap-3 rounded-lg border border-border/70 bg-surface-2 p-3">
                     <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><code className="text-xs font-semibold text-accent">{suggestion.parameter}</code><span className="text-[9px] uppercase tracking-wide text-text-muted">{suggestion.location}</span><span className="text-[9px] text-text-muted">{suggestion.confidence}% match</span></div><p className="mt-1 text-[11px] text-text-secondary">{suggestion.reason}</p></div>
                     <div className="min-w-0 self-center">{suggestion.payloads?.[0] ? <><p className="text-[9px] uppercase tracking-wide text-text-muted">Suggested edit</p><code className="mt-1 block truncate text-[10px] text-text-secondary" title={suggestion.payloads[0]}>{suggestion.payloads[0]}</code>{suggestion.payloads.length > 1 && <span className="text-[9px] text-text-muted">+{suggestion.payloads.length - 1} alternatives</span>}</> : <span className="text-[10px] text-text-muted">Manual context required</span>}</div>
-                    <div className="flex items-center gap-2 xl:justify-end"><Button size="sm" disabled={isBusy} onClick={() => edit(template, suggestion)}>Inspect</Button>{canRun ? <Button size="sm" variant="primary" disabled={isBusy || active || !confirmed} onClick={() => runChecks([{ template_id: template.id, module: suggestion.module }], moduleInfo[suggestion.module]?.short || suggestion.module)}>Run</Button> : <Badge variant={suggestion.automated ? 'warning' : 'neutral'}>{suggestion.automated ? 'enable writes' : 'manual'}</Badge>}</div>
+                    <div className="flex items-center gap-2 xl:justify-end"><Button size="sm" disabled={isBusy} onClick={() => edit(selectedTemplate, suggestion)}>Inspect</Button>{canRun ? <Button size="sm" variant="primary" disabled={isBusy || active || !confirmed} onClick={() => runChecks([{ template_id: selectedTemplate.id, module: suggestion.module }], moduleInfo[suggestion.module]?.short || suggestion.module)}>Run</Button> : <Badge variant={suggestion.automated ? 'warning' : 'neutral'}>{suggestion.automated ? 'enable writes' : 'manual'}</Badge>}</div>
                   </div>
                 })}{result && <div className="flex flex-col sm:flex-row sm:items-center gap-2 rounded-lg bg-surface-3/60 px-3 py-2 text-[11px]"><Badge variant={presentation.variant}>{presentation.label}</Badge><span className="text-text-secondary">{presentation.detail}</span><span className="sm:ml-auto shrink-0 text-text-muted">{result.requests} requests · {result.findings.length} signals</span></div>}</div>
               </details>

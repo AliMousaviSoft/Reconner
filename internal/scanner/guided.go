@@ -18,7 +18,7 @@ import (
 	"github.com/recon-platform/pkg/logger"
 )
 
-var GuidedModules = []string{"passive", "idor", "xss", "sqli", "nosqli", "ssti", "lfi", "ssrf", "open_redirect", "cors"}
+var GuidedModules = []string{"passive", "idor", "xss", "sqli", "nosqli", "ssti", "lfi", "ssrf", "open_redirect", "cors", "file_upload"}
 var GuidedManualModules = map[string]string{
 	"authz":        "requires role/permission and expected access decisions",
 	"csrf":         "requires a verified state change and browser cookie semantics",
@@ -203,13 +203,20 @@ func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (r
 		result.Reason = reason
 		return result, nil
 	}
+	if module == "file_upload" {
+		if parts, _, e := guidedMultipartFileFields(t.Request); e != nil || len(parts) == 0 {
+			result.Status = "skipped"
+			result.Reason = "no multipart file field (with a filename) in the captured request"
+			return result, nil
+		}
+	}
 	points := guidedPoints(t.Request)
 	if module == "idor" {
 		points = guidedIDORPoints(t.Request)
 	}
-	if len(points) == 0 && module != "cors" {
+	if len(points) == 0 && module != "cors" && module != "file_upload" {
 		result.Status = "skipped"
-		result.Reason = "no supported query, form or JSON insertion points; XML/multipart/header/path mutation requires manual testing"
+		result.Reason = "no supported query, form or JSON insertion points; XML/header/path mutation requires manual testing"
 		return result, nil
 	}
 	limited := len(points) > 8
@@ -280,6 +287,8 @@ func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (r
 		}
 	case "xss", "open_redirect", "cors":
 		guidedSmallChecks(ctx, scratch, t, module, body)
+	case "file_upload":
+		guidedFileUploadChecks(ctx, scratch, t)
 	default:
 		result.Status = "skipped"
 		result.Reason = "unsupported guided module"
@@ -330,6 +339,9 @@ func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (r
 	}
 	if module == "ssrf" {
 		result.Reason += " In-band only; OAST callbacks not enabled."
+	}
+	if module == "file_upload" {
+		result.Reason += " Retrieval/processing proof only; stored-SVG XSS and blind OOB SSRF/XXE upload checks are not run (browser/callback correlation not enabled in guided runs)."
 	}
 	return result, err
 }
