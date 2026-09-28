@@ -142,7 +142,7 @@ func RunGuided(ctx context.Context, db *database.DB, targetID string, input Guid
 				} else if f.Verdict == CandInconclusive {
 					verdict = VerifyInconclusive
 				}
-				ids, e := RecordDetectorObservation(ctx, db, DetectorObservation{TargetID: targetID, Type: f.Type, Severity: f.Severity, URL: capture.SafeDisplayURL(t.Request.URL), Method: t.Request.Method, Parameter: f.Parameter, Location: "capture:" + t.ID, Source: "guided-capture", DetectionMethod: check.Module, Confidence: 70, Provenance: "capture-template:" + t.ID, Verdict: verdict, Evidence: "Guided capture evidence is encrypted. Open the capture test case; template " + t.ID})
+				ids, e := RecordDetectorObservation(ctx, db, DetectorObservation{TargetID: targetID, Type: f.Type, Severity: f.Severity, URL: capture.SafeDisplayURL(t.Request.URL), Method: t.Request.Method, Parameter: f.Parameter, Location: "capture:" + t.ID, Payload: f.Payload, Source: "guided-capture", DetectionMethod: check.Module, Confidence: 70, Provenance: "capture-template:" + t.ID, Verdict: verdict, Evidence: "Guided capture evidence is encrypted. Open the capture test case; template " + t.ID})
 				if e != nil {
 					return report, fmt.Errorf("persist guided finding: %w", e)
 				}

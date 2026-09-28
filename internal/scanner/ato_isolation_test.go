@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -58,6 +59,15 @@ func TestATOSelfRedirectAnalysisNoOpenRedirectFinding(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='account_takeover'`, tid).Scan(&ato)
 	if ato == 0 {
 		t.Errorf("ATO must raise an account_takeover chain for an open redirect on an auth flow")
+	}
+
+	// The chain must carry the concrete reproduction payload (the actual
+	// param=attacker-value pair), not just prose describing the chain, so a
+	// reviewer can replay it directly instead of re-deriving it from the redirect.
+	var payload string
+	_ = db.QueryRow(`SELECT payload FROM vuln_findings WHERE target_id=? AND type='account_takeover'`, tid).Scan(&payload)
+	if payload == "" || !strings.Contains(payload, "next=") {
+		t.Errorf("account_takeover finding must carry the concrete redirect payload, got %q", payload)
 	}
 
 	// ISOLATION: ATO must NOT have written an independent open_redirect finding —

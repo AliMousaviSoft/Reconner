@@ -79,7 +79,11 @@ func (s *JWTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) er
 			}
 			seenFinding[key] = true
 			url := "jwt://" + shortToken(tk)
-			s.store(targetID, "jwt", iss.severity, url, iss.kind, iss.evidence, iss.confidence)
+			payload := iss.payload
+			if payload == "" {
+				payload = tk
+			}
+			s.store(targetID, "jwt", iss.severity, url, iss.kind, payload, iss.evidence, iss.confidence)
 			found++
 			logFn("warn", "jwt", fmt.Sprintf("JWT issue [%s %d%%]: %s", iss.severity, iss.confidence, iss.detail))
 		}
@@ -249,6 +253,11 @@ type jwtIssue struct {
 	detail     string
 	evidence   string
 	confidence int
+	// payload is the concrete reproduction input (a forged token, when the issue
+	// class produces one). Empty for issues that are a property of the ORIGINAL
+	// token rather than an injected/forged one — the caller falls back to the
+	// original token itself in that case.
+	payload string
 }
 
 // analyzeJWT runs every offline check against a single token.
@@ -262,10 +271,12 @@ func analyzeJWT(token string) []jwtIssue {
 
 	// alg=none — an unsigned token in circulation.
 	if alg == "NONE" || alg == "" {
+		forged := forgeAlgNone(token)
 		out = append(out, jwtIssue{
 			kind: "alg_none", severity: "high", confidence: ConfCandidateHi,
 			detail:   "Unsigned alg=none JWT observed; live acceptance needs replay proof",
-			evidence: "Token header alg=" + jwtAlg(hdr) + " and the token is unsigned. This is a high-signal candidate, not yet an auth-bypass finding; the active verifier separately replays an alg=none forgery against a protected endpoint. Candidate token: " + forgeAlgNone(token),
+			evidence: "Token header alg=" + jwtAlg(hdr) + " and the token is unsigned. This is a high-signal candidate, not yet an auth-bypass finding; the active verifier separately replays an alg=none forgery against a protected endpoint. Candidate token: " + forged,
+			payload:  forged,
 		})
 	}
 
@@ -277,6 +288,7 @@ func analyzeJWT(token string) []jwtIssue {
 				kind: "weak_secret", severity: "critical", confidence: ConfPoC,
 				detail:   fmt.Sprintf("JWT %s signed with a weak/known secret %q — token forgery", alg, sec),
 				evidence: fmt.Sprintf("The token's signature verifies with secret=%q, so arbitrary tokens can be minted. Proof — a forged admin token: %s", sec, forged),
+				payload:  forged,
 			})
 		}
 	}
@@ -453,7 +465,7 @@ func (s *JWTScanner) replayForgedBypass(ctx context.Context, targetID, kind, for
 		forgedResp := fetchAs(ctx, u, &attacker)
 		if looksLikeAuthObject(forgedResp) && bodiesSameObject(authed.Body, forgedResp.Body) {
 			ev := fmt.Sprintf("%s CONFIRMED at %s. %s Forged token: %s", kind, u, note, forged)
-			s.store(targetID, "jwt", "critical", u, kind, ev, ConfPoC)
+			s.store(targetID, "jwt", "critical", u, kind, forged, ev, ConfPoC)
 			return 1
 		}
 	}
@@ -842,12 +854,12 @@ func (s *JWTScanner) auditOAuth(ctx context.Context, targetID string, logFn LogF
 		seen[base] = true
 
 		if rt := strings.ToLower(q.Get("response_type")); strings.Contains(rt, "token") {
-			s.store(targetID, "oauth", "medium", raw, "response_type",
+			s.store(targetID, "oauth", "medium", raw, "response_type", raw,
 				"OAuth implicit flow (response_type="+q.Get("response_type")+") — the access token is returned in the URL fragment, where it leaks via history, Referer, and logs. Use the authorization-code flow with PKCE.", ConfEvidence)
 			found++
 		}
 		if q.Get("state") == "" && q.Get("redirect_uri") != "" {
-			s.store(targetID, "oauth", "medium", raw, "state",
+			s.store(targetID, "oauth", "medium", raw, "state", raw,
 				"OAuth authorize request has no state parameter — the flow is not CSRF-protected (authorization-code injection / login CSRF).", ConfCandidateHi)
 			found++
 		}
@@ -866,7 +878,7 @@ func shortToken(t string) string {
 	return t
 }
 
-func (s *JWTScanner) store(targetID, typ, sev, url, param, evidence string, confidence int) string {
+func (s *JWTScanner) store(targetID, typ, sev, url, param, payload, evidence string, confidence int) string {
 	weight := map[string]int{"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 1}[sev]
 	if weight == 0 {
 		weight = 1
@@ -877,7 +889,7 @@ func (s *JWTScanner) store(targetID, typ, sev, url, param, evidence string, conf
 	}
 	ids, _ := RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
 		TargetID: targetID, Type: typ, Severity: sev, URL: url, Method: "GET",
-		Parameter: param, Location: "token", Evidence: evidence, Source: "jwt",
+		Parameter: param, Location: "token", Payload: payload, Evidence: evidence, Source: "jwt",
 		DetectionMethod: param, Confidence: confidence, Priority: confidence * weight,
 		Verdict: verdict,
 	})

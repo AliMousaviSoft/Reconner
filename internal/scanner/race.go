@@ -132,7 +132,8 @@ func (s *RaceScanner) testPoint(ctx context.Context, targetID string, ip inserti
 	ev := fmt.Sprintf(
 		"%d simultaneous identical requests to %s (param %s) returned INCONSISTENT outcomes %s. A non-atomic limit/uniqueness check is a strong race-condition signal (e.g. coupon reuse, double-spend, limit bypass) — verify the business impact manually.",
 		raceBurst, ip.URL, ip.Param, formatCounts(counts))
-	s.store(targetID, ip, sev, ev, confidence)
+	payload := fmt.Sprintf("%s=1, fired as %d simultaneous identical requests", ip.Param, raceBurst)
+	s.store(targetID, ip, sev, payload, ev, confidence)
 	logFn("warn", "race", fmt.Sprintf("Race signal: %s param=%s outcomes=%s", ip.URL, ip.Param, formatCounts(counts)))
 	return true
 }
@@ -167,7 +168,7 @@ func (s *RaceScanner) candidatePoints(ctx context.Context, targetID string) []in
 	return out
 }
 
-func (s *RaceScanner) store(targetID string, ip insertionPoint, sev, evidence string, confidence int) {
+func (s *RaceScanner) store(targetID string, ip insertionPoint, sev, payload, evidence string, confidence int) {
 	priority := confidence * 2
 	verdict := CandDetected
 	if confidence >= ConfEvidence {
@@ -175,7 +176,7 @@ func (s *RaceScanner) store(targetID string, ip insertionPoint, sev, evidence st
 	}
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
 		TargetID: targetID, Type: "race_condition", Severity: sev, URL: ip.URL,
-		Method: ip.Method, Parameter: ip.Param, Location: insertionLocation(ip), Evidence: evidence,
+		Method: ip.Method, Parameter: ip.Param, Location: insertionLocation(ip), Payload: payload, Evidence: evidence,
 		Source: "race-native", DetectionMethod: "parallel-replay", Confidence: confidence,
 		Priority: priority, Verdict: verdict,
 	})

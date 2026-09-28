@@ -776,9 +776,12 @@ func (s *ExposureScanner) store(targetID, vulnType, severity, rawURL, param, evi
 		confidence = ConfHiddenCutoff
 		verdict = CandDetected
 	}
+	// These are discovery/disclosure findings, not injections: the reproduction
+	// IS the exact URL that exposed the content, so it doubles as the payload —
+	// a reviewer replays it with a plain GET.
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
 		TargetID: targetID, Type: vulnType, Severity: severity, URL: rawURL, Method: "GET",
-		Parameter: param, Location: "response", Evidence: evidence, Source: "exposure",
+		Parameter: param, Location: "response", Payload: rawURL, Evidence: evidence, Source: "exposure",
 		DetectionMethod: "content-signature", Confidence: confidence, Verdict: verdict,
 	})
 }

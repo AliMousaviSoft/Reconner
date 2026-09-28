@@ -105,18 +105,22 @@ func (s *AccountTakeoverEngine) Run(ctx context.Context, targetID string, logFn 
 	redirectHosts, redirects := s.openRedirects(ctx, targetID)
 
 	chains := 0
-	emit := func(sev, url, param, evidence string, conf int) {
-		s.store(targetID, "account_takeover", sev, url, param, evidence, conf)
+	emit := func(sev, url, param, payload, evidence string, conf int) {
+		s.store(targetID, "account_takeover", sev, url, param, payload, evidence, conf)
 		chains++
 		logFn("warn", "ato", fmt.Sprintf("ATO chain [%s %d%%]: %s", sev, conf, url))
 	}
 
 	// ── Chain 1: XSS + JS-readable session cookie → session hijack ──
-	for host, xurl := range xssHosts {
+	for host, xf := range xssHosts {
 		if cookies := dedupeStrings(jsCookies[host]); len(cookies) > 0 {
-			emit("critical", xurl, "xss+cookie",
-				fmt.Sprintf("ACCOUNT TAKEOVER chain — XSS → session theft. A confirmed XSS on %s can run document.cookie; the session cookie(s) %s are set WITHOUT HttpOnly, so JavaScript reads them directly. Payload exfiltrates the cookie to an attacker host and replays it → full session hijack. Fix: HttpOnly on session cookies AND fix the XSS. Repro: %s with a cookie-stealing payload.",
-					host, strings.Join(cookies, ", "), xurl), ConfEvidence)
+			payload := xf.payload
+			if payload == "" {
+				payload = xf.url
+			}
+			emit("critical", xf.url, "xss+cookie", payload,
+				fmt.Sprintf("ACCOUNT TAKEOVER chain — XSS → session theft. A confirmed XSS on %s can run document.cookie; the session cookie(s) %s are set WITHOUT HttpOnly, so JavaScript reads them directly. Payload exfiltrates the cookie to an attacker host and replays it → full session hijack. Fix: HttpOnly on session cookies AND fix the XSS. Repro: %s with the XSS payload %q, extended to exfiltrate document.cookie.",
+					host, strings.Join(cookies, ", "), xf.url, payload), ConfEvidence)
 		}
 	}
 
@@ -130,15 +134,16 @@ func (s *AccountTakeoverEngine) Run(ctx context.Context, targetID string, logFn 
 		if r.verified {
 			conf = ConfEvidence
 		}
-		emit(sev, r.url, r.param,
+		payload := r.param + "=" + r.redirectTo
+		emit(sev, r.url, r.param, payload,
 			fmt.Sprintf("ACCOUNT TAKEOVER chain — open redirect on an authentication flow. The %s parameter redirects off-origin (→ %s). On a login / OAuth / SSO / password-reset flow this hands the auth code, SSO assertion, or reset token to an attacker-controlled host (via the Location target and the Referer). Fix: strict allow-list of redirect targets. Repro: set %s to an attacker URL and complete the flow.",
 				r.param, r.redirectTo, r.param), conf)
 	}
 
 	// ── Chain 3: OAuth misconfig + open redirect on same host → code interception ──
-	for host := range oauthHosts {
+	for host, of := range oauthHosts {
 		if redirectHosts[host] {
-			emit("critical", oauthHosts[host], "oauth+redirect",
+			emit("critical", of.url, "oauth+redirect", of.url,
 				fmt.Sprintf("ACCOUNT TAKEOVER chain — OAuth authorization-code/token interception. %s has an OAuth flow with a weak posture (missing state / implicit flow) AND an open redirect on the same host. An attacker crafts an authorize request with a redirect_uri that bounces through the open redirect to their server, capturing the victim's code/token → account takeover. Fix: exact-match redirect_uri allow-list + state + auth-code flow with PKCE.",
 					host), ConfCandidateHi)
 		}
@@ -155,7 +160,7 @@ func (s *AccountTakeoverEngine) Run(ctx context.Context, targetID string, logFn 
 			sev, conf = "high", ConfCandidateHi
 			vector = "leaks via Referer/history AND is readable by the XSS on this host"
 		}
-		emit(sev, hits[0].url, hits[0].param,
+		emit(sev, hits[0].url, hits[0].param, hits[0].url,
 			fmt.Sprintf("ACCOUNT TAKEOVER risk — sensitive auth token in URL. Parameter %q on %s carries an authentication secret in the query string, which %s. Fix: move the token to a POST body or a short-lived, single-use exchange.",
 				hits[0].param, host, vector), conf)
 	}
@@ -164,10 +169,15 @@ func (s *AccountTakeoverEngine) Run(ctx context.Context, targetID string, logFn 
 	return nil
 }
 
-// hostsForTypes returns host → one representative finding URL for the given
-// vuln_findings types (findings only, not rejected candidates).
-func (s *AccountTakeoverEngine) hostsForTypes(ctx context.Context, targetID string, types []string) map[string]string {
-	out := map[string]string{}
+// atoSourceFinding is a representative underlying finding for a host: its URL
+// plus the exact payload that proved it, so a chained ATO finding can quote the
+// concrete input rather than just describing the chain in prose.
+type atoSourceFinding struct{ url, payload string }
+
+// hostsForTypes returns host → one representative finding (URL + payload) for
+// the given vuln_findings types (findings only, not rejected candidates).
+func (s *AccountTakeoverEngine) hostsForTypes(ctx context.Context, targetID string, types []string) map[string]atoSourceFinding {
+	out := map[string]atoSourceFinding{}
 	if len(types) == 0 {
 		return out
 	}
@@ -177,16 +187,18 @@ func (s *AccountTakeoverEngine) hostsForTypes(ctx context.Context, targetID stri
 		args = append(args, t)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT url FROM vuln_findings WHERE target_id=? AND type IN (`+ph+`) AND COALESCE(status,'finding') != 'rejected'`, args...)
+		`SELECT url, COALESCE(payload,'') FROM vuln_findings WHERE target_id=? AND type IN (`+ph+`) AND COALESCE(status,'finding') != 'rejected'`, args...)
 	if err != nil {
 		return out
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var u string
-		if rows.Scan(&u) == nil {
-			if h := atoHost(u); h != "" && out[h] == "" {
-				out[h] = u
+		var u, p string
+		if rows.Scan(&u, &p) == nil {
+			if h := atoHost(u); h != "" {
+				if _, exists := out[h]; !exists {
+					out[h] = atoSourceFinding{url: u, payload: p}
+				}
 			}
 		}
 	}
@@ -357,7 +369,7 @@ func (s *AccountTakeoverEngine) authTokensInURL(ctx context.Context, targetID st
 	return out
 }
 
-func (s *AccountTakeoverEngine) store(targetID, typ, sev, rawURL, param, evidence string, confidence int) {
+func (s *AccountTakeoverEngine) store(targetID, typ, sev, rawURL, param, payload, evidence string, confidence int) {
 	weight := map[string]int{"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 1}[sev]
 	if weight == 0 {
 		weight = 1
@@ -368,7 +380,7 @@ func (s *AccountTakeoverEngine) store(targetID, typ, sev, rawURL, param, evidenc
 	}
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
 		TargetID: targetID, Type: typ, Severity: sev, URL: rawURL, Method: "GET",
-		Parameter: param, Location: "query", Evidence: evidence, Source: "account-takeover",
+		Parameter: param, Location: "query", Payload: payload, Evidence: evidence, Source: "account-takeover",
 		DetectionMethod: "workflow-correlation", Confidence: confidence,
 		Priority: confidence * weight, Verdict: verdict,
 	})

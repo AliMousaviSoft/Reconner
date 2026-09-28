@@ -85,6 +85,13 @@ func TestAnalyzeJWT(t *testing.T) {
 		}
 		return m
 	}
+	issuesByKind := func(tok string) map[string]jwtIssue {
+		m := map[string]jwtIssue{}
+		for _, i := range analyzeJWT(tok) {
+			m[i.kind] = i
+		}
+		return m
+	}
 
 	// Weak secret + no exp.
 	weak := kinds(mkJWT(t, map[string]any{"sub": "1"}, "secret"))
@@ -95,10 +102,21 @@ func TestAnalyzeJWT(t *testing.T) {
 		t.Error("missing exp must be flagged")
 	}
 
+	// The weak-secret finding must carry the forged token as its reproduction
+	// payload — a reviewer replays it directly instead of re-deriving the forgery.
+	weakIssues := issuesByKind(mkJWT(t, map[string]any{"sub": "1"}, "secret"))
+	if p := weakIssues["weak_secret"].payload; p == "" || !hmacSecretMatches(p, "secret") {
+		t.Fatalf("weak_secret issue must carry a valid forged token as payload, got %q", p)
+	}
+
 	// alg=none token.
 	none := kinds(forgeAlgNone(mkJWT(t, map[string]any{"sub": "1", "exp": float64(time.Now().Add(time.Hour).Unix())}, "secret")))
 	if !none["alg_none"] {
 		t.Error("alg=none token must be flagged")
+	}
+	noneIssues := issuesByKind(forgeAlgNone(mkJWT(t, map[string]any{"sub": "1", "exp": float64(time.Now().Add(time.Hour).Unix())}, "secret")))
+	if p := noneIssues["alg_none"].payload; p == "" || strings.Split(p, ".")[2] != "" {
+		t.Fatalf("alg_none issue must carry the unsigned forged token as payload, got %q", p)
 	}
 
 	// Sensitive claim.

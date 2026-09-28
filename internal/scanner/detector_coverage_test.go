@@ -90,6 +90,15 @@ func TestRaceDetectorPositiveAndStableNegative(t *testing.T) {
 			if got != tt.wantCandidate {
 				t.Fatalf("race candidates = %d, want %d", got, tt.wantCandidate)
 			}
+			if tt.wantCandidate > 0 {
+				var payload string
+				if err := db.QueryRow(`SELECT payload FROM candidates WHERE target_id=? AND type='race_condition'`, targetID).Scan(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload == "" {
+					t.Fatal("race_condition finding must carry the reproduction payload (param + burst description)")
+				}
+			}
 		})
 	}
 }
