@@ -81,7 +81,7 @@ func TestSQLiStorePreservesJSONCandidateContract(t *testing.T) {
 	defer db.Close()
 	s := &SQLiScanner{db: db}
 	ip := insertionPoint{URL: "https://api.example.test/search", Param: "filter", Value: "blue", Method: "POST", ContentType: "application/json", Location: "query"}
-	s.store(tid, "sqli", "high", ip, "error_based", "reproduced database error")
+	s.store(tid, "sqli", "high", ip, "error_based", "blue'", "reproduced database error")
 
 	var method, location, parameter, payload string
 	if err := db.QueryRow(`SELECT method,location,parameter,payload FROM candidates WHERE target_id=? AND type='sqli'`, tid).
@@ -93,5 +93,8 @@ func TestSQLiStorePreservesJSONCandidateContract(t *testing.T) {
 	}
 	if payload == "error_based" {
 		t.Fatal("detector subtype must not be stored as if it were a replayable request body")
+	}
+	if payload != "blue'" {
+		t.Fatalf("expected the actual reproduction payload to be persisted, got %q", payload)
 	}
 }

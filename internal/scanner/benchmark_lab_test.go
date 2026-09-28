@@ -157,7 +157,7 @@ func runSQLi(app func() *httptest.Server, param string) func(*testing.T) bool {
 		defer srv.Close()
 		s := &SQLiScanner{}
 		ip := insertionPoint{URL: srv.URL + "/?" + param + "=1", Param: param, Method: "GET"}
-		kind, _ := s.quickProbe(context.Background(), ip, nil)
+		kind, _, _ := s.quickProbe(context.Background(), ip, nil)
 		return kind != ""
 	}
 }

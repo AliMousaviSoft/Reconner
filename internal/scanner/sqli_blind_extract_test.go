@@ -103,7 +103,7 @@ func TestBlindBooleanProvenByExtraction(t *testing.T) {
 
 	s := &SQLiScanner{}
 	ip := insertionPoint{URL: srv.URL + "/item?id=1", Param: "id", Method: "GET"}
-	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	kind, payload, ev := s.quickProbe(context.Background(), ip, nil)
 	if kind != "boolean_based" {
 		t.Fatalf("expected boolean_based detection, got kind=%q ev=%q", kind, ev)
 	}
@@ -113,7 +113,10 @@ func TestBlindBooleanProvenByExtraction(t *testing.T) {
 	if !strings.Contains(ev, "PROVEN by extraction") {
 		t.Fatalf("evidence should state it was proven by extraction; got: %q", ev)
 	}
-	t.Logf("proven: %s", ev)
+	if payload == "" {
+		t.Fatal("boolean-based finding must carry the TRUE/FALSE reproduction payload")
+	}
+	t.Logf("proven: %s payload=%s", ev, payload)
 }
 
 // TestBlindBooleanCoincidenceNoFinding is the aparat.com false-positive: a TRUE/
@@ -145,9 +148,9 @@ func TestBlindBooleanCoincidenceNoFinding(t *testing.T) {
 
 	s := &SQLiScanner{}
 	ip := insertionPoint{URL: srv.URL + "/item?id=1", Param: "id", Method: "GET"}
-	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	kind, payload, ev := s.quickProbe(context.Background(), ip, nil)
 	if kind != "" {
-		t.Fatalf("coincidental differential (no SQL) must NOT be reported; got kind=%q ev=%q", kind, ev)
+		t.Fatalf("coincidental differential (no SQL) must NOT be reported; got kind=%q payload=%q ev=%q", kind, payload, ev)
 	}
 }
 
@@ -167,9 +170,12 @@ func TestBlindBooleanStatusOracle(t *testing.T) {
 
 	s := &SQLiScanner{}
 	ip := insertionPoint{URL: srv.URL + "/item?id=1", Param: "id", Value: "1", Method: "GET"}
-	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	kind, payload, ev := s.quickProbe(context.Background(), ip, nil)
 	if kind != "boolean_based" || !strings.Contains(ev, dbname) {
 		t.Fatalf("status-only boolean oracle must be extracted; kind=%q evidence=%q", kind, ev)
+	}
+	if payload == "" {
+		t.Fatal("status-oracle boolean finding must carry the reproduction payload")
 	}
 }
 
@@ -194,9 +200,12 @@ func TestOrderByBooleanOracleExtraction(t *testing.T) {
 
 	s := &SQLiScanner{}
 	ip := insertionPoint{URL: srv.URL + "/users?sort=name", Param: "sort", Value: "name", Method: "GET"}
-	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	kind, payload, ev := s.quickProbe(context.Background(), ip, nil)
 	if kind != "boolean_based" || !strings.Contains(ev, dbname) || !strings.Contains(ev, "ORDER BY") {
 		t.Fatalf("ORDER BY SQLi must be proven by extraction; kind=%q evidence=%q", kind, ev)
+	}
+	if payload == "" {
+		t.Fatal("ORDER BY boolean finding must carry the reproduction payload")
 	}
 }
 
@@ -221,9 +230,12 @@ func TestORBooleanOracleWhenBaselineSelectsNoRow(t *testing.T) {
 
 	s := &SQLiScanner{}
 	ip := insertionPoint{URL: srv.URL + "/item?id=999", Param: "id", Value: "999", Method: "GET"}
-	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	kind, payload, ev := s.quickProbe(context.Background(), ip, nil)
 	if kind != "boolean_based" || !strings.Contains(ev, dbname) || !strings.Contains(ev, "OR-based") {
 		t.Fatalf("OR oracle must recover SQLi when baseline has no row; kind=%q evidence=%q", kind, ev)
+	}
+	if payload == "" {
+		t.Fatal("OR-based boolean finding must carry the reproduction payload")
 	}
 }
 

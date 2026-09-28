@@ -36,12 +36,15 @@ func TestSQLiContentDifferentialBoolean(t *testing.T) {
 
 	s := &SQLiScanner{}
 	ip := insertionPoint{URL: srv.URL + "/?id=1", Param: "id", Method: "GET"}
-	kind, ev := s.quickProbe(context.Background(), ip, nil)
+	kind, payload, ev := s.quickProbe(context.Background(), ip, nil)
 	if kind != "boolean_based" {
 		t.Fatalf("same-length blind boolean SQLi must be detected + proven; got kind=%q ev=%q", kind, ev)
 	}
 	if !strings.Contains(ev, `"sqli"`) {
 		t.Errorf("evidence must carry the extracted database name: %q", ev)
+	}
+	if payload == "" {
+		t.Error("finding must carry the reproduction payload")
 	}
 }
 
@@ -163,7 +166,7 @@ func TestSQLiContentDifferentialNoFP(t *testing.T) {
 
 	s := &SQLiScanner{}
 	ip := insertionPoint{URL: srv.URL + "/?id=1", Param: "id", Method: "GET"}
-	if kind, ev := s.quickProbe(context.Background(), ip, nil); kind != "" {
+	if kind, _, ev := s.quickProbe(context.Background(), ip, nil); kind != "" {
 		t.Fatalf("an inert parameter must NOT be flagged as SQLi; got kind=%q ev=%q", kind, ev)
 	}
 }

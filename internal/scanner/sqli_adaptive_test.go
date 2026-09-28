@@ -109,7 +109,7 @@ func TestErrorForceProbeE2E(t *testing.T) {
 	s := &SQLiScanner{}
 	ip := insertionPoint{URL: srv.URL + "/?id=1", Param: "id", Method: "GET"}
 	base, _ := sendInjected(context.Background(), sqliHTTPClient, ip, "1", nil)
-	kind, ev := s.errorForceProbe(context.Background(), ip, nil, base)
+	kind, payload, ev := s.errorForceProbe(context.Background(), ip, nil, base)
 	if kind != "error_based" {
 		t.Fatalf("expected error_based, got %q", kind)
 	}
@@ -118,6 +118,9 @@ func TestErrorForceProbeE2E(t *testing.T) {
 	}
 	if !strings.Contains(ev, "5.7.40") {
 		t.Errorf("evidence should include the leaked version: %q", ev)
+	}
+	if !strings.Contains(payload, "extractvalue") {
+		t.Errorf("returned payload should be the actual extractvalue expression sent, got %q", payload)
 	}
 }
 

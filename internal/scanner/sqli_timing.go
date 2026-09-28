@@ -168,19 +168,19 @@ func summarizeTTFBSamples(ds []time.Duration, requested int) (median, min, max t
 
 // timeBasedSQLi returns (dbms, evidence, true) only when the induced delay scales
 // LINEARLY with the injected sleep — proven server-side SLEEP, not noise.
-func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth map[string]string) (string, string, bool) {
+func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth map[string]string) (string, string, string, bool) {
 	baseValue := sqliBaseValue(ip)
 	// The trace begins only after the request is written, so TCP/TLS setup is not
 	// part of TTFB. quickProbe has also already warmed the shared transport in the
 	// normal pipeline; a dedicated warm-up request was pure duplicate work.
 	base, _, baseMax, ok := sampleTTFB(ctx, ip, baseValue, auth, 3, 8*time.Second)
 	if !ok {
-		return "", "", false
+		return "", "", "", false
 	}
 	// Noise gate: an endpoint that is already slow or wildly jittery cannot support a
 	// trustworthy timing verdict — skip it rather than risk a false positive.
 	if base > 3*time.Second || baseMax > base+2*time.Second {
-		return "", "", false
+		return "", "", "", false
 	}
 
 	for _, p := range timingPayloads() {
@@ -224,9 +224,9 @@ func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth
 				"DBMS: %s. Payload: %s",
 			base.Milliseconds(), i0.Milliseconds(), i2.Milliseconds(), add2.Milliseconds(),
 			i5.Milliseconds(), add5.Milliseconds(), step.Milliseconds(), p.dbms, p.build(val, 5))
-		return p.dbms, ev, true
+		return p.dbms, p.build(val, 5), ev, true
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // timingScalingConfirmed is the pure decision: a time-based verdict holds only when
@@ -283,8 +283,8 @@ func (s *SQLiScanner) timeBasedPass(ctx context.Context, targetID string, candid
 		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if dbms, ev, ok := s.timeBasedSQLi(ctx, ip, auth); ok {
-				s.store(targetID, "sqli", "high", ip, "time_based",
+			if dbms, payload, ev, ok := s.timeBasedSQLi(ctx, ip, auth); ok {
+				s.store(targetID, "sqli", "high", ip, "time_based", payload,
 					ev+" ["+ip.Method+"]")
 				found.Add(1)
 				logFn("warn", "sqli", fmt.Sprintf("SQLi (time_based/%s): %s param=%s [%s]", dbms, ip.URL, ip.Param, ip.Method))

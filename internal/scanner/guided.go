@@ -280,9 +280,9 @@ func runGuidedModule(parent context.Context, t GuidedTemplate, module string) (r
 			if ctx.Err() != nil {
 				break
 			}
-			kind, evidence := s.quickProbe(ctx, p.ip, nil)
+			kind, payload, evidence := s.quickProbe(ctx, p.ip, nil)
 			if kind != "" {
-				s.store(t.ID, "sqli", "high", p.ip, kind, evidence)
+				s.store(t.ID, "sqli", "high", p.ip, kind, payload, evidence)
 			}
 		}
 	case "xss", "open_redirect", "cors":

@@ -62,7 +62,7 @@ func TestSQLiErrorBasedRequiresReproduction(t *testing.T) {
 	}))
 	defer transient.Close()
 	ip := insertionPoint{URL: transient.URL + "/?id=1", Param: "id", Method: "GET"}
-	if kind, _ := (&SQLiScanner{}).quickProbe(ctx, ip, nil); kind == "error_based" {
+	if kind, _, _ := (&SQLiScanner{}).quickProbe(ctx, ip, nil); kind == "error_based" {
 		t.Fatal("a one-shot (transient) DB error must NOT be reported as error-based SQLi")
 	}
 
@@ -76,7 +76,7 @@ func TestSQLiErrorBasedRequiresReproduction(t *testing.T) {
 	}))
 	defer consistent.Close()
 	ip2 := insertionPoint{URL: consistent.URL + "/?id=1", Param: "id", Method: "GET"}
-	if kind, _ := (&SQLiScanner{}).quickProbe(ctx, ip2, nil); kind != "error_based" {
+	if kind, _, _ := (&SQLiScanner{}).quickProbe(ctx, ip2, nil); kind != "error_based" {
 		t.Fatalf("a reproducible DB error must be reported as error-based SQLi, got %q", kind)
 	}
 }
@@ -96,12 +96,16 @@ func TestSQLiFullEngineInjectsHeaderAndAuthenticatedCookie(t *testing.T) {
 	auth := map[string]string{"Cookie": "session=secret; cart=7"}
 
 	headerIP := insertionPoint{URL: srv.URL, Param: "X-Forwarded-For", Value: "127.0.0.1", Method: "GET", Location: "header"}
-	if kind, _ := s.quickProbe(context.Background(), headerIP, auth); kind != "error_based" {
+	if kind, payload, _ := s.quickProbe(context.Background(), headerIP, auth); kind != "error_based" {
 		t.Fatalf("full SQLi engine did not reach header sink: %q", kind)
+	} else if payload == "" {
+		t.Fatal("header SQLi must carry the reproduction payload")
 	}
 	cookieIP := insertionPoint{URL: srv.URL, Param: "cart", Value: "7", Method: "GET", Location: "cookie"}
-	if kind, _ := s.quickProbe(context.Background(), cookieIP, auth); kind != "error_based" {
+	if kind, payload, _ := s.quickProbe(context.Background(), cookieIP, auth); kind != "error_based" {
 		t.Fatalf("full SQLi engine did not reach authenticated cookie sink: %q", kind)
+	} else if payload == "" {
+		t.Fatal("cookie SQLi must carry the reproduction payload")
 	}
 	req, err := buildInjectedRequest(context.Background(), cookieIP, "7'", auth)
 	if err != nil {
