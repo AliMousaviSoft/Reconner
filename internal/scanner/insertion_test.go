@@ -177,6 +177,25 @@ func TestQueryProbeEscapesRawSemicolonWithoutChangingDecodedValue(t *testing.T) 
 	}
 }
 
+// Regression: file_upload.go is the only caller that passes a negative
+// fallback (-1, meaning "take all of the non-prone parameters") to
+// loadRoutedInsertionPoints. When a target has zero parameters classified as
+// upload-prone (routine for small sites with a single ordinary parameter,
+// e.g. "search"), len(prone)+fallback underflowed to -1 and make() panicked
+// with "makeslice: cap out of range" before the negative fallback was ever
+// clamped, crashing the whole file_upload module on real targets.
+func TestLoadRoutedInsertionPointsHandlesNegativeFallbackWithNoProneParams(t *testing.T) {
+	db, tid := testDB(t)
+	defer db.Close()
+	_, _ = db.Exec(`INSERT INTO parameters (id,target_id,url,parameter,method,content_type,location)
+		VALUES ('p1',?,'https://shop.test/?search=x','search','GET','','query')`, tid)
+
+	got := loadRoutedInsertionPoints(context.Background(), db, tid, ClassUpload, 100, -1)
+	if len(got) != 1 || got[0].Param != "search" {
+		t.Fatalf("expected the sole non-prone parameter to survive a negative fallback: %+v", got)
+	}
+}
+
 func TestXSSSurfaceDoesNotDropTrackingOrCMSParameters(t *testing.T) {
 	db, tid := testDB(t)
 	defer db.Close()

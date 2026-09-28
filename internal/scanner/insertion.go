@@ -462,11 +462,11 @@ func loadRoutedInsertionPoints(ctx context.Context, db *database.DB, targetID st
 		return insertionIdentity(other[i].ip) < insertionIdentity(other[j].ip)
 	})
 
-	combined := make([]routedPoint, 0, len(prone)+fallback)
-	combined = append(combined, prone...)
 	if fallback < 0 || fallback > len(other) {
 		fallback = len(other)
 	}
+	combined := make([]routedPoint, 0, len(prone)+fallback)
+	combined = append(combined, prone...)
 	combined = append(combined, other[:fallback]...)
 
 	semanticCounts := map[string]int{}
