@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -295,6 +296,8 @@ func runLabAttempt(t *testing.T, s *FileUploadScanner, db *database.DB, targetID
 		proofURL, evidence = s.verifyConfigEffect(context.Background(), ip, nil, a)
 	case proofOOB:
 		proofURL, evidence = s.verifyOOB(context.Background(), a)
+	case proofSQLiError:
+		proofURL, evidence = s.verifySQLiFilename(context.Background(), ip, nil, a, result.body)
 	}
 	if evidence == "" {
 		return 0
@@ -625,5 +628,128 @@ func TestFileUploadAttemptMatrixIsComplete(t *testing.T) {
 		if !languages[ext] {
 			t.Errorf("%s content mismatch is not sent as image/jpeg", ext)
 		}
+	}
+}
+
+// The old magic-byte polyglot was just the literal text "GIF89a" prepended to
+// PHP source — not a real image by any format's actual specification. This
+// proves the replacement is genuinely valid: Go's own stdlib decoder (the
+// same family of decoder a getimagesize()-style validator represents) accepts
+// each format as a real 1x1 image, and the appended payload survives past the
+// format's own terminator (GIF trailer / JPEG EOI / PNG IEND) intact.
+func TestImagePolyglotPrefixProducesRealDecodableImages(t *testing.T) {
+	payload := []byte("<?php echo 'reconner-proof'; ?>")
+	for _, format := range []string{"gif", "jpeg", "png"} {
+		prefix := imagePolyglotPrefix(format)
+		full := append(append([]byte{}, prefix...), payload...)
+		img, name, err := image.Decode(bytes.NewReader(full))
+		if err != nil || img == nil {
+			t.Fatalf("%s polyglot did not decode as a real image: %v", format, err)
+		}
+		if name != format {
+			t.Fatalf("%s polyglot decoded as unexpected format %q", format, name)
+		}
+		if !bytes.Contains(full, payload) {
+			t.Fatalf("%s polyglot lost the appended payload after its terminator", format)
+		}
+	}
+}
+
+// SQLi via filename metadata must be differential: an app that always shows
+// the same generic error for any unusual filename (never touching a
+// database) must NOT be reported, and a real filename-driven SQL error must be.
+func TestFileUploadFilenameSQLiIsDifferentialNotSingleResponse(t *testing.T) {
+	withLoopbackAllowed(t)
+	s, db, targetID := newFileUploadTestScanner(t)
+
+	vulnerable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		filename, _, _ := readLabUpload(r)
+		if strings.Contains(filename, "'") {
+			fmt.Fprint(w, "Error: You have an error in your SQL syntax near '\\''' at line 1")
+			return
+		}
+		fmt.Fprint(w, "OK")
+	}))
+	defer vulnerable.Close()
+	attempts := fileUploadAttempts(oobCapability{}, false, db, targetID, multipartPoint(vulnerable.URL))
+	sqliAttempt := chooseAttempt(t, attempts, "filename_sqli_error", nil)
+	if got := runLabAttempt(t, s, db, targetID, multipartPoint(vulnerable.URL), sqliAttempt); got != 1 {
+		t.Fatalf("filename-driven SQL error was not reported: got %d finding(s)", got)
+	}
+
+	clean := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always the same generic error, regardless of filename content — no
+		// database is actually involved, so this must never be reported.
+		fmt.Fprint(w, "Error: invalid file")
+	}))
+	defer clean.Close()
+	attempts = fileUploadAttempts(oobCapability{}, false, db, targetID, multipartPoint(clean.URL))
+	sqliAttempt = chooseAttempt(t, attempts, "filename_sqli_error", nil)
+	if got := runLabAttempt(t, s, db, targetID, multipartPoint(clean.URL), sqliAttempt); got != 0 {
+		t.Fatalf("a static generic error present for every filename produced a false positive: got %d finding(s)", got)
+	}
+}
+
+// The single biggest discovery gap this module had: every upstream
+// discoverer (JS static analysis, OpenAPI parsing, directory/path discovery)
+// can only hand file_upload.go a "parameter" it already recorded, so a bare
+// upload endpoint that nothing ever recorded as a parameter (e.g. a literal
+// only ever seen inside a JS bundle) was structurally invisible. This proves
+// the blind-discovery phase finds and fully attacks such an endpoint end to
+// end, with NO `parameters` row seeded at all — only an `http_services` row,
+// exactly like a host that some other module found but never analyzed for
+// form fields.
+func TestFileUploadRunDiscoversBlindUploadEndpointWithNoKnownParameter(t *testing.T) {
+	withLoopbackAllowed(t)
+	var mu sync.Mutex
+	files := map[string][]byte{}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			mu.Lock()
+			body, ok := files[r.URL.Path]
+			mu.Unlock()
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			if marker := executedLabMarker(body); marker != "" && strings.Contains(string(body), "<?php") {
+				fmt.Fprint(w, marker)
+				return
+			}
+			_, _ = w.Write(body)
+			return
+		}
+		if r.URL.Path != "/api/upload" {
+			http.NotFound(w, r)
+			return
+		}
+		filename, _, body := readLabUpload(r)
+		if filename == "" {
+			http.Error(w, "no file field", http.StatusBadRequest)
+			return
+		}
+		stored := "/uploads/" + path.Base(filename)
+		mu.Lock()
+		files[stored] = body
+		mu.Unlock()
+		writeUploadJSON(w, server.URL+stored)
+	}))
+	defer server.Close()
+
+	s, db, targetID := newFileUploadTestScanner(t)
+	// Only an http_services row — deliberately no `parameters` row anywhere,
+	// simulating a host some other module found but never analyzed for a
+	// multipart/JSON field shape.
+	if _, err := db.Exec(`INSERT INTO http_services (id,target_id,url,status_code,content_type,cms)
+		VALUES ('svc-blind-upload',?,?,200,'text/html','')`, targetID, server.URL+"/"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Run(context.Background(), targetID, func(string, string, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := v3FindingCount(t, db, targetID, "file_upload", "/api/upload"); got < 1 {
+		t.Fatalf("blind discovery did not find/attack the unrecorded upload endpoint: findings=%d", got)
 	}
 }

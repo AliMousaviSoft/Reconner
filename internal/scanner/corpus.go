@@ -60,6 +60,7 @@ var corpusSpecs = map[string]corpusSpec{
 	"exposure":  {"Exposure paths", "wordlist", "High-signal configuration and secret paths checked by exposure scanning.", func() []string { return append([]string{}, exposureConfigPaths...) }},
 	"graphql":   {"GraphQL paths", "wordlist", "Endpoint paths used by GraphQL discovery and introspection checks.", func() []string { return append([]string{}, graphqlPaths...) }},
 	"api_spec":  {"API specification paths", "wordlist", "Swagger and OpenAPI document paths checked by exposure scanning.", func() []string { return append([]string{}, apiSpecPaths...) }},
+	"upload":    {"Upload endpoint paths", "wordlist", "Common app-framework and third-party upload-widget paths probed for upload endpoints no other module discovered.", func() []string { return append([]string{}, defaultUploadPaths...) }},
 	"extensions": {"File extensions", "wordlist", "Extensions supplied to directory fuzzers.", func() []string {
 		return strings.Split("php,asp,aspx,jsp,html,txt,bak,backup,old,zip,sql,tar,gz,rar,7z,xml,json,yaml,yml,env,js,map,pdf,cfg,conf,swp,inc", ",")
 	}},
@@ -120,7 +121,7 @@ func normalizeCorpusValue(id, value string) string {
 		value = strings.TrimPrefix(value, ".")
 	case "extensions":
 		value = strings.TrimLeft(value, ".")
-	case "directory", "backup", "exposure", "graphql", "api_spec":
+	case "directory", "backup", "exposure", "graphql", "api_spec", "upload":
 		if value != "" && !strings.HasPrefix(value, "/") {
 			value = "/" + value
 		}
@@ -142,7 +143,7 @@ func validCorpusValue(id, value string) bool {
 		return extensionPattern.MatchString(value)
 	case "parameters":
 		return usableParamName(value)
-	case "directory", "backup", "exposure", "graphql", "api_spec":
+	case "directory", "backup", "exposure", "graphql", "api_spec", "upload":
 		return strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") &&
 			!strings.Contains(value, "://") && !strings.Contains(value, "..")
 	case "xss":

