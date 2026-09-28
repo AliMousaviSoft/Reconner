@@ -128,6 +128,7 @@ func (h *Handler) Router() http.Handler {
 	// Targets
 	api.HandleFunc("/targets", h.requireAuth(h.handleListTargets)).Methods("GET")
 	api.HandleFunc("/targets", h.requireAuth(h.handleCreateTarget)).Methods("POST")
+	api.HandleFunc("/targets/quick-scan", h.requireAuth(h.handleQuickScan)).Methods("POST")
 	api.HandleFunc("/targets/{id}", h.requireAuth(h.handleGetTarget)).Methods("GET")
 	api.HandleFunc("/targets/{id}", h.requireAuth(h.handleUpdateTarget)).Methods("PUT")
 	api.HandleFunc("/targets/{id}", h.requireAuth(h.handleDeleteTarget)).Methods("DELETE")

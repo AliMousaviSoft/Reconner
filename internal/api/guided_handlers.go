@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -252,7 +253,34 @@ func (h *Handler) handleAnalyzeCapture(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, 400, "select at least one guided check")
 		return
 	}
-	job := scanner.GuidedInput{Modules: modules, Checks: checks, AllowUnsafe: input.AllowUnsafe}
+	runID, taskID, runErr := h.enqueueGuidedRun(r.Context(), v["id"], v["cid"], modules, checks, templateIDs, input.AllowUnsafe)
+	if runErr != nil {
+		h.writeError(w, runErr.status, runErr.msg)
+		return
+	}
+	_ = h.captureAudit(r, runID, "analyze_capture")
+	h.writeSuccess(w, map[string]string{"run_id": runID, "task_id": taskID})
+}
+
+// guidedRunError carries the HTTP status a caller should surface, so
+// enqueueGuidedRun stays usable both from an HTTP handler (which wants exact
+// status codes) and from an internal caller like quick-scan (which just
+// wants a readable error).
+type guidedRunError struct {
+	status int
+	msg    string
+}
+
+func (e *guidedRunError) Error() string { return e.msg }
+
+// enqueueGuidedRun builds and queues a guided-analysis run from already-
+// validated modules/checks/templateIDs. Shared by handleAnalyzeCapture (an
+// operator explicitly selecting checks in the Guided Analyze workspace) and
+// the quick-scan entry point (a project created directly from a pasted raw
+// request, which auto-selects every applicable module and queues this same
+// way with no manual step-through).
+func (h *Handler) enqueueGuidedRun(ctx context.Context, targetID, captureID string, modules []string, checks []scanner.GuidedCheck, templateIDs []string, allowUnsafe bool) (runID, taskID string, runErr *guidedRunError) {
+	job := scanner.GuidedInput{Modules: modules, Checks: checks, AllowUnsafe: allowUnsafe}
 	box := secret.New(h.cfg.SessionSecret)
 	ids := map[string]bool{}
 	total := 0
@@ -265,58 +293,48 @@ func (h *Handler) handleAnalyzeCapture(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if len(ids) >= 50 {
-			h.writeError(w, 400, "select between 1 and 50 requests per run")
-			return
+			return "", "", &guidedRunError{400, "select between 1 and 50 requests per run"}
 		}
 		ids[id] = true
 		var enc, resp string
-		if e := h.db.QueryRowContext(r.Context(), `SELECT rt.encrypted_request,COALESCE(cr.encrypted_response,'') FROM request_templates rt JOIN capture_sessions cs ON cs.id=rt.capture_session_id LEFT JOIN captured_responses cr ON cr.request_template_id=rt.id WHERE rt.id=? AND rt.target_id=? AND rt.capture_session_id=? AND (cs.expires_at IS NULL OR cs.expires_at>datetime('now'))`, id, v["id"], v["cid"]).Scan(&enc, &resp); e != nil {
-			h.writeError(w, 404, "selected request not found or capture expired")
-			return
+		if e := h.db.QueryRowContext(ctx, `SELECT rt.encrypted_request,COALESCE(cr.encrypted_response,'') FROM request_templates rt JOIN capture_sessions cs ON cs.id=rt.capture_session_id LEFT JOIN captured_responses cr ON cr.request_template_id=rt.id WHERE rt.id=? AND rt.target_id=? AND rt.capture_session_id=? AND (cs.expires_at IS NULL OR cs.expires_at>datetime('now'))`, id, targetID, captureID).Scan(&enc, &resp); e != nil {
+			return "", "", &guidedRunError{404, "selected request not found or capture expired"}
 		}
 		t := scanner.GuidedTemplate{ID: id}
-		if json.Unmarshal([]byte(box.Decrypt(enc)), &t.Request) != nil || json.Unmarshal([]byte(box.Decrypt(resp)), &t.Response) != nil {
-			h.writeError(w, 500, "capture could not be decrypted")
-			return
+		if json.Unmarshal([]byte(box.Decrypt(enc)), &t.Request) != nil || (resp != "" && json.Unmarshal([]byte(box.Decrypt(resp)), &t.Response) != nil) {
+			return "", "", &guidedRunError{500, "capture could not be decrypted"}
 		}
-		if !scanner.GuidedURLInScope(r.Context(), h.db, v["id"], t.Request.URL) {
-			h.writeError(w, 400, "request is no longer in project scope")
-			return
+		if !scanner.GuidedURLInScope(ctx, h.db, targetID, t.Request.URL) {
+			return "", "", &guidedRunError{400, "request is no longer in project scope"}
 		}
 		// Keep just the response metadata/body needed by passive checks; don't copy
 		// multi-megabyte captured response bodies into every job snapshot.
 		t.Response.Body = nil
 		total += len(t.Request.Body)
 		if total > capture.MaxImportBytes {
-			h.writeError(w, 400, "selected request bodies exceed run limit")
-			return
+			return "", "", &guidedRunError{400, "selected request bodies exceed run limit"}
 		}
 		job.Templates = append(job.Templates, t)
 	}
 	if len(job.Templates) == 0 {
-		h.writeError(w, 400, "select between 1 and 50 requests per run")
-		return
+		return "", "", &guidedRunError{400, "select between 1 and 50 requests per run"}
 	}
 	b, _ := json.Marshal(job)
 	enc := box.Encrypt(string(b))
 	if !strings.HasPrefix(enc, "enc:v1:") {
-		h.writeError(w, 500, "encryption failed")
-		return
+		return "", "", &guidedRunError{500, "encryption failed"}
 	}
-	runID := uuid.NewString()
-	if _, e := h.db.ExecContext(r.Context(), `INSERT INTO guided_runs(id,target_id,capture_id,encrypted_input) VALUES(?,?,?,?)`, runID, v["id"], v["cid"], enc); e != nil {
-		h.writeError(w, 500, "could not create run")
-		return
+	runID = uuid.NewString()
+	if _, e := h.db.ExecContext(ctx, `INSERT INTO guided_runs(id,target_id,capture_id,encrypted_input) VALUES(?,?,?,?)`, runID, targetID, captureID, enc); e != nil {
+		return "", "", &guidedRunError{500, "could not create run"}
 	}
-	task, e := h.sched.CreateGuidedTask(v["id"], runID, modules)
+	task, e := h.sched.CreateGuidedTask(targetID, runID, modules)
 	if e != nil {
 		_, _ = h.db.Exec(`DELETE FROM guided_runs WHERE id=?`, runID)
-		h.writeError(w, 500, "could not queue run")
-		return
+		return "", "", &guidedRunError{500, "could not queue run"}
 	}
 	_, _ = h.db.Exec(`UPDATE guided_runs SET task_id=? WHERE id=?`, task.ID, runID)
-	_ = h.captureAudit(r, runID, "analyze_capture")
-	h.writeSuccess(w, map[string]string{"run_id": runID, "task_id": task.ID})
+	return runID, task.ID, nil
 }
 
 func (h *Handler) handleCaptureRuns(w http.ResponseWriter, r *http.Request) {

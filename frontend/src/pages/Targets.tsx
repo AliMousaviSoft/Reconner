@@ -19,6 +19,10 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
   const [priorityFilter, setPriorityFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
+  const [quickScanOpen, setQuickScanOpen] = useState(false)
+  const [quickScanRaw, setQuickScanRaw] = useState('')
+  const [quickScanName, setQuickScanName] = useState('')
+  const [quickScanBusy, setQuickScanBusy] = useState(false)
   const [scanTarget, setScanTarget] = useState<Target | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Target | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -207,6 +211,22 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
     if (fileRef.current) fileRef.current.value = ''
   }
 
+  const submitQuickScan = async () => {
+    if (!quickScanRaw.trim()) { addToast('error', 'Paste a raw HTTP request first'); return }
+    setQuickScanBusy(true)
+    try {
+      const res = await targetsApi.quickScan(quickScanRaw, quickScanName.trim() || undefined)
+      setQuickScanOpen(false); setQuickScanRaw(''); setQuickScanName('')
+      if (res.modules_queued > 0) {
+        addToast('success', `Project created · ${res.modules_queued} test${res.modules_queued === 1 ? '' : 's'} (${res.modules_detected.join(', ')}) running now`)
+      } else {
+        addToast('info', res.note || 'Project created, but no automated tests apply to this request')
+      }
+      navigate(`/targets/${res.target_id}`)
+    } catch (e) { addToast('error', e instanceof Error ? e.message : 'Quick scan failed') }
+    finally { setQuickScanBusy(false) }
+  }
+
   const dot: Record<string, string> = {
     idle: 'bg-text-muted',
     pending: 'bg-series-3 animate-pulse',
@@ -253,6 +273,7 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
             </Button>
           )}
           <Button size="sm" variant="ghost" onClick={() => fileRef.current?.click()}>Import</Button>
+          <Button size="sm" variant="ghost" onClick={() => setQuickScanOpen(true)}>⚡ Quick scan from request</Button>
           <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>+ New Project</Button>
           <input ref={fileRef} type="file" accept=".txt,.csv" onChange={handleImport} className="hidden" />
         </div>
@@ -388,6 +409,26 @@ export default function Targets({ filterKind }: { filterKind?: 'web' | 'network'
               ))}
             </div>
           )}
+
+      {/* Quick scan from a raw request */}
+      <Modal open={quickScanOpen} onClose={() => { if (!quickScanBusy) setQuickScanOpen(false) }} title="Quick scan from raw request" width="md">
+        <div className="space-y-3">
+          <p className="text-xs text-text-muted">Paste one raw HTTP request (from Burp, browser devtools, or curl -v). Reconner creates a project scoped to this exact request, automatically identifies which vulnerability classes apply (XSS, SQLi, NoSQLi, SSRF, LFI, SSTI, IDOR, open redirect, CORS, file upload), and runs every applicable check immediately — no manual step-through.</p>
+          <Input label="Project name (optional)" placeholder="defaults to the method + path"
+            value={quickScanName} onChange={e => setQuickScanName(e.target.value)} disabled={quickScanBusy} />
+          <div>
+            <label className="label" htmlFor="quick-scan-raw">Raw HTTP request *</label>
+            <textarea id="quick-scan-raw" className="input resize-none font-mono text-xs" dir="ltr" rows={12} spellCheck={false}
+              placeholder={'GET /api/user?id=1 HTTP/1.1\nHost: app.example.com\nCookie: session=…\n\n'}
+              value={quickScanRaw} onChange={e => setQuickScanRaw(e.target.value)} disabled={quickScanBusy} />
+          </div>
+          <div className="rounded-lg border border-severity-medium/30 bg-severity-medium/5 p-3 text-[11px]">Only paste requests you are authorized to test. This immediately sends bounded active probes to the request's own host — the same active testing Guided Analyze performs after an explicit "run" confirmation.</div>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" disabled={quickScanBusy} onClick={() => setQuickScanOpen(false)}>Cancel</Button>
+            <Button variant="primary" loading={quickScanBusy} disabled={quickScanBusy || !quickScanRaw.trim()} onClick={submitQuickScan}>Create project & run all applicable tests →</Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Create / Edit Modal */}
       <Modal open={createOpen || !!editTarget} onClose={() => { setCreateOpen(false); setEditTarget(null); setForm(emptyForm) }}

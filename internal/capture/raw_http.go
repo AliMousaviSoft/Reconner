@@ -10,6 +10,20 @@ import (
 	"strings"
 )
 
+// ParseRawHTTPRequest parses a single raw HTTP request -- exactly what a
+// browser devtools panel, a proxy's "copy as raw request", or curl's `-v`
+// output produces -- into one Exchange with no response (the caller pasted
+// only a request). The request's own Host header or an absolute request
+// line resolves the URL; parseRawRequest already falls back to https when
+// neither states a scheme.
+func ParseRawHTTPRequest(raw []byte) (Exchange, error) {
+	req, err := parseRawRequest(raw, "")
+	if err != nil {
+		return Exchange{}, err
+	}
+	return Exchange{Source: "raw_request", Request: req}, nil
+}
+
 func parseRawRequest(raw []byte, absoluteURL string) (Request, error) {
 	if len(raw) == 0 {
 		return Request{}, fmt.Errorf("request message is empty")

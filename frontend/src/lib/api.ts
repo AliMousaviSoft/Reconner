@@ -81,6 +81,9 @@ export const targets = {
   get: (id: string) => req<Target>(`/targets/${id}`),
   create: (data: {domain: string; name?: string; description?: string; tags?: string[]; priority?: string; notes?: string; kind?: string; exclude_scope?: string; scan_user_agent?: string; scan_headers?: Record<string, string>}) =>
     req<Target>('/targets', { method: 'POST', body: JSON.stringify(data) }),
+  quickScan: (rawRequest: string, name?: string) =>
+    req<{ target_id: string; capture_id: string; template_id: string; modules_detected: string[]; modules_queued: number; run_id?: string; task_id?: string; note?: string }>(
+      '/targets/quick-scan', { method: 'POST', body: JSON.stringify({ raw_request: rawRequest, name }) }),
   networkServices: (id: string) => req<NetworkService[]>(`/targets/${id}/network-services`),
   assets: (id: string) => req<Asset[]>(`/targets/${id}/assets`),
   addAsset: (id: string, value: string, name: string, assetType?: string) =>
