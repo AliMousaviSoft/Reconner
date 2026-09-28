@@ -22,6 +22,10 @@ type VerifyResult struct {
 	Evidence   string
 	Reason     string // esp. for INCONCLUSIVE (WAF/rate-limit/session/etc.)
 	Method     string // which verifier/technique
+	// Payload is the concrete reproduction input (the exact request value/body a
+	// reviewer can replay) that produced this verdict. Optional: when empty,
+	// RecordCandidateResult leaves the candidate's existing Payload untouched.
+	Payload string
 }
 
 // Verifier proves (or refutes) a candidate by its class-appropriate technique.

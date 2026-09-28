@@ -33,6 +33,51 @@ func TestRecordCandidateResultProjectsConfirmedFinding(t *testing.T) {
 	}
 }
 
+// A verifier that proves/refutes an already-stored candidate (e.g. the XSS
+// context or sqlmap verifiers) often knows the concrete reproduction payload
+// only at verify time, not when the bare candidate was first detected.
+// VerifyResult.Payload must reach the persisted candidate row so every
+// verified/inconclusive finding still carries a replayable POC.
+func TestRecordCandidateResultPropagatesVerifyResultPayload(t *testing.T) {
+	db, tid := testDB(t)
+	defer db.Close()
+	c := VulnerabilityCandidate{
+		TargetID: tid, Type: "xss", Subtype: "reflected", URL: "https://example.test/?q=1",
+		Method: "GET", Parameter: "q", Location: "query", DetectionSource: "nuclei",
+		DetectionMethod: "template", Severity: "high",
+	}
+	id, err := RecordCandidateResult(context.Background(), db, c, VerifyResult{
+		Verdict: VerifyInconclusive, Confidence: 70, Method: "xss-context",
+		Reason: "breakout characters did not survive raw", Payload: `"><script>alert(1)</script>`,
+	}, FindingMeta{Actor: "test"})
+	if err != nil {
+		t.Fatalf("record result: %v", err)
+	}
+	var payload string
+	if err := db.QueryRow(`SELECT payload FROM candidates WHERE id=?`, id).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload != `"><script>alert(1)</script>` {
+		t.Fatalf("VerifyResult.Payload must be persisted onto the candidate, got %q", payload)
+	}
+
+	// Re-verifying with an empty Payload must NOT wipe out the payload already
+	// recorded — only a non-empty VerifyResult.Payload may overwrite it.
+	id2, err := RecordCandidateResult(context.Background(), db, VulnerabilityCandidate{ID: id, TargetID: tid, Type: "xss"}, VerifyResult{
+		Verdict: VerifyInconclusive, Confidence: 70, Method: "xss-context", Reason: "re-checked",
+	}, FindingMeta{Actor: "test"})
+	if err != nil || id2 != id {
+		t.Fatalf("re-verify: id2=%q err=%v", id2, err)
+	}
+	var payload2 string
+	if err := db.QueryRow(`SELECT payload FROM candidates WHERE id=?`, id).Scan(&payload2); err != nil {
+		t.Fatal(err)
+	}
+	if payload2 != `"><script>alert(1)</script>` {
+		t.Fatalf("an empty VerifyResult.Payload on re-verify must not erase the existing payload, got %q", payload2)
+	}
+}
+
 func TestRejectedCandidateCanReopenOnFreshProof(t *testing.T) {
 	db, tid := testDB(t)
 	defer db.Close()

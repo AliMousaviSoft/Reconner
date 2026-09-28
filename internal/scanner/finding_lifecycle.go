@@ -175,6 +175,9 @@ func RecordCandidateResult(ctx context.Context, db *database.DB, c Vulnerability
 	if result.Evidence != "" {
 		c.Evidence = result.Evidence
 	}
+	if result.Payload != "" {
+		c.Payload = result.Payload
+	}
 
 	var (
 		id  string

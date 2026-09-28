@@ -243,8 +243,8 @@ func (s *VerifyScanner) verifyReflectedXSS(ctx context.Context, targetID string,
 			URL: p.url, Method: "GET", Parameter: p.param, Location: "query",
 			DetectionSource: "internal", DetectionMethod: "reflection", Severity: "high"}
 		r := verifier.Verify(ctx, c)
-		if r.Verdict == VerifyVerified {
-			c.Payload = contextPayloadFor(r.Evidence)
+		if r.Payload == "" && r.Verdict == VerifyVerified {
+			r.Payload = contextPayloadFor(r.Evidence)
 		}
 		_, _ = RecordCandidateResult(ctx, s.db, c, r, FindingMeta{Actor: "xss-context"})
 		if r.Verdict == VerifyVerified {

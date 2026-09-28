@@ -68,6 +68,9 @@ func TestXSSVerifierExecutableVsEncoded(t *testing.T) {
 	if !strings.Contains(r.Evidence+r.Reason, "html_text") {
 		t.Fatalf("evidence must name the context: %q", r.Evidence)
 	}
+	if strings.TrimSpace(r.Payload) == "" {
+		t.Fatalf("every candidate/verified verdict must carry a reproducible payload: %+v", r)
+	}
 
 	// safe: HTML-encoded reflection → REJECTED (the key FP defense)
 	safe := reflectApp(true, func(s string) string { return "<div>" + s + "</div>" })
@@ -83,6 +86,9 @@ func TestXSSVerifierExecutableVsEncoded(t *testing.T) {
 	r3 := v.Verify(ctx, VulnerabilityCandidate{Type: "xss", URL: none.URL + "/?q=x", Parameter: "q"})
 	if r3.Verdict != VerifyInconclusive {
 		t.Fatalf("non-reflected must be INCONCLUSIVE: %+v", r3)
+	}
+	if strings.TrimSpace(r3.Payload) == "" {
+		t.Fatalf("inconclusive verdicts must still carry the probe payload that was tested, so a reviewer can reproduce the (non-)finding: %+v", r3)
 	}
 }
 

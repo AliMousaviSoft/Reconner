@@ -678,6 +678,7 @@ func (v *XSSContextVerifier) Verify(ctx context.Context, c VulnerabilityCandidat
 				return VerifyResult{
 					Verdict: VerifyVerified, Confidence: 99, Method: "xss-script-resource-browser",
 					Evidence: "reflected XSS PROVEN by loading the injected endpoint as an external JavaScript resource; the payload executed and set the browser nonce. Executable payload: " + pl,
+					Payload:  pl,
 				}
 			}
 		}
@@ -695,6 +696,7 @@ func (v *XSSContextVerifier) Verify(ctx context.Context, c VulnerabilityCandidat
 				Confidence: 99,
 				Method:     "xss-browser",
 				Evidence:   evidence,
+				Payload:    pl,
 			}
 		}
 	}
@@ -715,7 +717,8 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 	// hit against a blocked endpoint is not promoted to a false finding.
 	if looksLikeBlockPage(r.Status, r.Body) {
 		return VerifyResult{Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "xss-context",
-			Reason: fmt.Sprintf("request was answered by a WAF/edge block or challenge page (HTTP %d) — the reflected value is echoed by the WAF, not rendered by the app, so it does not execute", r.Status)}
+			Payload: xssProbeFor(marker),
+			Reason:  fmt.Sprintf("request was answered by a WAF/edge block or challenge page (HTTP %d) — the reflected value is echoed by the WAF, not rendered by the app, so it does not execute", r.Status)}
 	}
 	a := analyzeReflectionProbe(r.Body, marker, xssProbeSuffix)
 	// Content-Type gate: a reflected payload only executes when the browser renders
@@ -730,20 +733,21 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 	htmlSink := browserRendersResponse(r.Status, r.ContentType, r.Body, r.NoSniff)
 	if a.Reflected && !htmlSink && scriptLikeContentType(r.ContentType) {
 		return VerifyResult{Verdict: VerifyInconclusive, Confidence: ConfCandidateLo,
-			Method: "xss-script-resource",
-			Reason: "input is reflected in a JavaScript/JSONP resource; it must be loaded as an external script in a real browser to prove execution"}
+			Method:  "xss-script-resource",
+			Payload: xssProbeFor(marker),
+			Reason:  "input is reflected in a JavaScript/JSONP resource; it must be loaded as an external script in a real browser to prove execution"}
 	}
 	switch {
 	case !a.Reflected:
-		return VerifyResult{Verdict: VerifyInconclusive, Reason: "probe not reflected at this parameter", Method: "xss-context"}
+		return VerifyResult{Verdict: VerifyInconclusive, Reason: "probe not reflected at this parameter", Method: "xss-context", Payload: xssProbeFor(marker)}
 	case a.Encoded && !a.Executable:
-		return VerifyResult{Verdict: VerifyRejected, Confidence: 0,
+		return VerifyResult{Verdict: VerifyRejected, Confidence: 0, Payload: xssProbeFor(marker),
 			Reason: "input is reflected but safely HTML-encoded in " + a.Context + " context — not executable", Method: "xss-context"}
 	case !a.Executable:
-		return VerifyResult{Verdict: VerifyInconclusive,
+		return VerifyResult{Verdict: VerifyInconclusive, Payload: xssProbeFor(marker),
 			Reason: "reflected in " + a.Context + " but breakout characters did not survive raw — cannot prove execution", Method: "xss-context"}
 	case !htmlSink:
-		return VerifyResult{Verdict: VerifyRejected, Confidence: 0,
+		return VerifyResult{Verdict: VerifyRejected, Confidence: 0, Payload: xssProbeFor(marker),
 			Reason: "input is reflected with breakout chars surviving, but the response is " + ctLabel(r.ContentType) +
 				nosniffNote(r.NoSniff) + " — a browser will not render it as HTML, so it does not execute (reflected XSS requires an HTML-rendered response)",
 			Method: "xss-context"}
@@ -765,7 +769,7 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 		payload, needle, confirmable = jsScriptBreakout(a)
 	}
 	if !confirmable {
-		return VerifyResult{Verdict: VerifyInconclusive, Method: "xss-context",
+		return VerifyResult{Verdict: VerifyInconclusive, Method: "xss-context", Payload: xssProbeFor(marker),
 			Reason: "executable-looking reflection in " + a.Context + " context, but no deterministic browserless breakout applies (needs runtime/DOM proof)"}
 	}
 	baseR := sendInjectedResponse(ctx, dastClient, ip, newXSSToken("rcnbase"), auth)
@@ -781,13 +785,13 @@ func (v *XSSContextVerifier) verifyBrowserless(ctx context.Context, c Vulnerabil
 				!execPayloadSurvived(baseR.Body, p) {
 				ev := "reflected HTML injection candidate in " + a.Context + " context: the context-specific breakout formed executable-looking markup and the exact handler/script survived unencoded, but runtime execution has not been observed. Candidate payload: " +
 					p.Payload + " | context-agnostic polyglot: " + xssPolyglot
-				return VerifyResult{Verdict: VerifyInconclusive, Confidence: 85, Reason: ev, Evidence: ev, Method: "xss-context-runtime-required"}
+				return VerifyResult{Verdict: VerifyInconclusive, Confidence: 85, Reason: ev, Evidence: ev, Method: "xss-context-runtime-required", Payload: p.Payload}
 			}
 		}
-		return VerifyResult{Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "xss-context",
+		return VerifyResult{Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "xss-context", Payload: payload,
 			Reason: "HTML breakout formed a live element, but no tested executable vector survived CSP/filtering; runtime browser proof required"}
 	}
-	return VerifyResult{Verdict: VerifyRejected, Confidence: 0, Method: "xss-context",
+	return VerifyResult{Verdict: VerifyRejected, Confidence: 0, Method: "xss-context", Payload: payload,
 		Reason: "input is reflected in " + a.Context + " context but the injected marker element did NOT form a live HTML tag (neutralised by the surrounding markup / re-encoded on the confirm request) — not executable, so not a real XSS"}
 }
 

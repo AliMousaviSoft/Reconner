@@ -229,6 +229,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 	xssProbeBlocked := looksLikeBlockPage(probe.Status, probe.Body)
 	if xssProbeBlocked {
 		c := s.xssCandidate(targetID, ip, a.Context, "XSS probe reached a WAF/edge block page; application behavior is unknown")
+		c.Payload = xssProbeFor(probeMarker)
 		_, _ = RecordCandidateResult(ctx, s.db, c, VerifyResult{
 			Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "dast-waf",
 			Reason: fmt.Sprintf("WAF/edge block or challenge during XSS probe (HTTP %d)", probe.Status),
@@ -251,6 +252,7 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 				}
 			}
 			c := s.xssCandidate(targetID, ip, "script_resource", "input is reflected in a JavaScript resource; external-script execution requires runtime proof")
+			c.Payload = xssProbeFor(probeMarker)
 			_, _ = RecordCandidateResult(ctx, s.db, c, VerifyResult{
 				Verdict: VerifyInconclusive, Confidence: ConfCandidateLo, Method: "dast-script-resource",
 				Reason: "reflected JavaScript/JSONP resource found, but executable script-resource loading was not proven",
@@ -350,6 +352,17 @@ func (s *DASTScanner) testPoint(ctx context.Context, targetID string, ip inserti
 					method = "dast-" + proofMethod
 					reason = "Chromium was unavailable; a bounded existing payload candidate survived the parsed response and CSP checks, but runtime execution remains unproven"
 					c.Evidence = note + ". Candidate payload: " + proofPayload
+				} else if confirmable {
+					// The context-aware breakout payload was built and sent (it just
+					// didn't clear the CONFIRMED bar above) — still the concrete,
+					// reproducible input a reviewer needs, so surface it rather than
+					// leaving the finding without a repro payload.
+					c.Payload = payload
+					c.Evidence = note + ". Candidate payload: " + payload
+				} else {
+					// Nothing context-specific was buildable; the reflected probe itself
+					// is still the minimal reproduction of the raw breakout signal.
+					c.Payload = xssProbeFor(probeMarker)
 				}
 				_, _ = RecordCandidateResult(ctx, s.db, c, VerifyResult{Verdict: VerifyInconclusive,
 					Confidence: confidence, Method: method, Reason: reason}, FindingMeta{Actor: "dast"})
