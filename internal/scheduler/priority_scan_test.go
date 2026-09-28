@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -130,9 +131,9 @@ func TestRunPerAssetPhaseGivesDuplicatesOnlyTheLightTier(t *testing.T) {
 // A real, distinct, low-signal tail asset (alive, but no admin panel, no
 // interesting name, no params, no high-yield tech — score far below a real
 // app-shaped host) must get only the light tier, not the full module group,
-// even though it is nobody's duplicate. This is what actually shrinks a deep
-// scan's wall-clock cost on a 1000-subdomain target: ordering alone still lets
-// every tail host eat the full pipeline unless depth is cut too.
+// even though it is nobody's duplicate — but ONLY once the target has enough
+// distinct assets (lightTierMinAssetCount) for the tradeoff to be worth it.
+// Seeds 10 hosts (1 admin + 9 boring) to cross that threshold.
 func TestRunPerAssetPhaseGivesLowScoreTailAssetsOnlyTheLightTier(t *testing.T) {
 	s := newTestScheduler(t)
 	tid := uuid.NewString()
@@ -140,13 +141,20 @@ func TestRunPerAssetPhaseGivesLowScoreTailAssetsOnlyTheLightTier(t *testing.T) {
 		t.Fatal(err)
 	}
 	// admin.example.test: interesting name + admin panel → clearly above threshold.
-	// cdn7.example.test: alive, generic title, no other signal → clearly below threshold.
-	if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code,page_title) VALUES
-		(?,?,?,1,200,'Admin Login'),
-		(?,?,?,1,200,'')`,
-		uuid.NewString(), tid, "admin.example.test",
-		uuid.NewString(), tid, "cdn7.example.test"); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code,page_title) VALUES (?,?,?,1,200,'Admin Login')`,
+		uuid.NewString(), tid, "admin.example.test"); err != nil {
 		t.Fatal(err)
+	}
+	// 9 boring filler hosts (alive, no title, no other signal → below
+	// threshold) so the target crosses lightTierMinAssetCount. Empty titles
+	// keep them out of wildcard dedup, so each counts as its own distinct
+	// Ordered asset — exactly the "real, distinct, low-signal" case this test
+	// is about, not a duplicate.
+	for i := 1; i <= 9; i++ {
+		if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code,page_title) VALUES (?,?,?,1,200,'')`,
+			uuid.NewString(), tid, fmt.Sprintf("cdn%d.example.test", i)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	taskID := uuid.NewString()
 	if _, err := s.db.Exec(`INSERT INTO tasks (id,target_id,type,status,modules,total) VALUES (?,?,?,?,?,?)`,
@@ -190,6 +198,56 @@ func TestRunPerAssetPhaseGivesLowScoreTailAssetsOnlyTheLightTier(t *testing.T) {
 	}
 }
 
+// Below lightTierMinAssetCount, every distinct asset keeps the FULL module
+// group regardless of score — a small target (a handful of subdomains) is
+// already fast enough that trading accuracy for speed on its tail isn't
+// worth it, and prioritized scanning is now the default for every scan size.
+func TestRunPerAssetPhaseKeepsFullDepthOnSmallTargets(t *testing.T) {
+	s := newTestScheduler(t)
+	tid := uuid.NewString()
+	if _, err := s.db.Exec(`INSERT INTO targets (id,domain) VALUES (?,?)`, tid, "example.test"); err != nil {
+		t.Fatal(err)
+	}
+	// Only 2 hosts total — far below lightTierMinAssetCount. cdn7 would be
+	// below lightTierScoreThreshold on its own, but the cutoff must not apply.
+	if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code,page_title) VALUES
+		(?,?,?,1,200,'Admin Login'),
+		(?,?,?,1,200,'')`,
+		uuid.NewString(), tid, "admin.example.test",
+		uuid.NewString(), tid, "cdn7.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	taskID := uuid.NewString()
+	if _, err := s.db.Exec(`INSERT INTO tasks (id,target_id,type,status,modules,total) VALUES (?,?,?,?,?,?)`,
+		taskID, tid, "full_scan", "running", "[]", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var calls []string
+	stubRun := func(ctx context.Context, module string) error {
+		var host string
+		_ = s.db.QueryRow(`SELECT current_asset FROM tasks WHERE id=?`, taskID).Scan(&host)
+		mu.Lock()
+		calls = append(calls, host+"::"+module)
+		mu.Unlock()
+		return nil
+	}
+
+	group := []string{ModuleNuclei, ModuleSQLi}
+	s.runPerAssetPhase(context.Background(), taskID, tid, group, stubRun, func(string, string, string) {})
+
+	full := 0
+	for _, c := range calls {
+		if strings.HasSuffix(c, "::"+ModuleSQLi) {
+			full++
+		}
+	}
+	if full != 2 {
+		t.Fatalf("expected BOTH hosts to get the full pipeline (sqli) on a small target, got %d: %v", full, calls)
+	}
+}
+
 // End-to-end wiring: a task created with the "prioritized" token must reach
 // the per-asset branch inside executeTask (not silently fall back to the
 // ordinary path) and still finish cleanly through the real module dispatch —
@@ -219,5 +277,100 @@ func TestExecuteTaskHonorsPrioritizedFlagEndToEnd(t *testing.T) {
 	}
 	if phaseStatus != "completed" {
 		t.Fatalf("expected the exposure phase to complete via the prioritized branch, got status=%q", phaseStatus)
+	}
+}
+
+// Prioritized scanning is now the DEFAULT — a task created with no
+// "prioritized"/"classic_order" token at all must still take the per-asset
+// branch. Proven the same way as the explicit-token test: current_asset gets
+// set (only runPerAssetPhase/updateAssetProgress ever writes it), which a
+// task running the plain module-by-module path would never touch.
+func TestExecuteTaskDefaultsToPrioritizedWithoutAnyToken(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets(id,domain) VALUES('default-prio-target','example.com')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code) VALUES (?,?,?,1,200)`,
+		uuid.NewString(), "default-prio-target", "example.com"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask("default-prio-target", []string{ModuleExposure}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.executeTask(context.Background(), task.ID)
+
+	var currentAsset string
+	if err := s.db.QueryRow(`SELECT COALESCE(current_asset,'') FROM tasks WHERE id=?`, task.ID).Scan(&currentAsset); err != nil {
+		t.Fatal(err)
+	}
+	if currentAsset == "" {
+		t.Fatalf("expected the default (no token) task to run through the per-asset branch and set current_asset, got empty")
+	}
+}
+
+// "classic_order" opts back into the old module-by-module sweep even though
+// prioritized is now the default — current_asset must stay unset because the
+// per-asset branch (the only writer of that column) is never entered.
+func TestExecuteTaskClassicOrderOptsOutOfPrioritized(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets(id,domain) VALUES('classic-target','example.com')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code) VALUES (?,?,?,1,200)`,
+		uuid.NewString(), "classic-target", "example.com"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask("classic-target", []string{ModuleExposure, "classic_order"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.executeTask(context.Background(), task.ID)
+
+	var taskStatus, currentAsset string
+	if err := s.db.QueryRow(`SELECT status, COALESCE(current_asset,'') FROM tasks WHERE id=?`, task.ID).Scan(&taskStatus, &currentAsset); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "finished" {
+		t.Fatalf("expected the classic-order task to finish, got status=%q", taskStatus)
+	}
+	if currentAsset != "" {
+		t.Fatalf("expected classic_order to skip the per-asset branch entirely, but current_asset=%q was set", currentAsset)
+	}
+}
+
+// A single-asset-scoped task (the "scan this asset" button) must NEVER enter
+// the per-asset branch, regardless of the new prioritized-by-default setting
+// — entering it would call ComputeAssetPriority for the WHOLE target and
+// could run the module against every other asset too, silently widening a
+// scan the operator deliberately narrowed to one host.
+func TestExecuteTaskScopedTaskNeverEntersPrioritizedBranch(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets(id,domain) VALUES('scoped-target','example.com')`); err != nil {
+		t.Fatal(err)
+	}
+	// Two live hosts on the target — if the per-asset branch ran, it would
+	// have something to iterate over and current_asset would get set.
+	if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code) VALUES
+		(?,?,?,1,200),(?,?,?,1,200)`,
+		uuid.NewString(), "scoped-target", "example.com",
+		uuid.NewString(), "scoped-target", "other.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateScopedTask("scoped-target", []string{ModuleExposure}, 1, "other.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.executeTask(context.Background(), task.ID)
+
+	var taskStatus, currentAsset string
+	if err := s.db.QueryRow(`SELECT status, COALESCE(current_asset,'') FROM tasks WHERE id=?`, task.ID).Scan(&taskStatus, &currentAsset); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "finished" {
+		t.Fatalf("expected the scoped task to finish, got status=%q", taskStatus)
+	}
+	if currentAsset != "" {
+		t.Fatalf("expected a single-asset-scoped task to never enter the per-asset branch, but current_asset=%q was set", currentAsset)
 	}
 }

@@ -57,6 +57,18 @@ var lightTierModuleSet = map[string]bool{
 // running zero modules on a real, distinct, live asset.
 const lightTierScoreThreshold = 15
 
+// lightTierMinAssetCount gates the score-based tail cutoff behind target
+// size. Prioritized ordering is now the default for every scan, including a
+// 3-subdomain target where a full pipeline on every asset is already fast
+// and a wrongly-shallow pass on a legitimately small app is a worse trade
+// than the wall-clock savings. The cutoff only pays for itself once a target
+// has enough distinct assets that skipping depth on the tail is what makes a
+// large scan finish in reasonable time — below this count, every distinct
+// asset gets the full module group regardless of score (duplicates/wildcard-
+// catch-all hosts still always get the light tier: that's genuine
+// redundancy, not a size-based tradeoff).
+const lightTierMinAssetCount = 10
+
 func isPerAssetModule(module string) bool { return perAssetModuleSet[module] }
 
 // collectPerAssetModules gathers every not-yet-handled per-asset module from
@@ -124,6 +136,8 @@ func (s *Scheduler) runPerAssetPhase(ctx context.Context, taskID, targetID strin
 		}
 	}
 
+	applyTailCutoff := len(plan.Ordered) >= lightTierMinAssetCount
+
 	type assetWork struct {
 		host    string
 		score   int
@@ -132,7 +146,7 @@ func (s *Scheduler) runPerAssetPhase(ctx context.Context, taskID, targetID strin
 	var work []assetWork
 	for _, a := range plan.Ordered {
 		mods := group
-		if !a.IsMainDomain && a.Score < lightTierScoreThreshold && len(light) > 0 {
+		if applyTailCutoff && !a.IsMainDomain && a.Score < lightTierScoreThreshold && len(light) > 0 {
 			mods = light
 		}
 		work = append(work, assetWork{host: a.Host, score: a.Score, modules: mods})

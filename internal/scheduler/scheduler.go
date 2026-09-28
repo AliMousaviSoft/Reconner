@@ -598,7 +598,7 @@ var ErrInvalidModuleSelection = errors.New("invalid module selection")
 func scanOptionToken(module string) bool {
 	switch module {
 	case "speed_slow", "speed_normal", "speed_fast",
-		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized",
+		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized", "classic_order",
 		"network_fast", "network_normal", "network_deep", "full_ports":
 		return true
 	default:
@@ -665,7 +665,7 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 	}
 	for _, token := range []string{
 		"speed_slow", "speed_normal", "speed_fast", "no_subdomain_brute",
-		"asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized",
+		"asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized", "classic_order",
 		ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
 		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
 		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports",
@@ -1542,12 +1542,23 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	subBrute := true        // slow permutation/brute phase of subdomain enum (default on)
 	asnDiscovery := false   // explicit opt-in only after program-scope/WHOIS verification
 	singleEndpoint := false // confine the whole scan to the seed URL(s) and paths under them
-	prioritized := false    // score assets, run the full per-asset module group on the highest-value host first
+	// prioritized: score every asset (main domain always first, then WAF/tech/
+	// panel/size signals) and run the full per-asset module group on the
+	// highest-value host before moving to the next, instead of sweeping one
+	// module across every host first. DEFAULT ON — it strictly subsumes the
+	// old module-by-module order (same modules run, same total work, just
+	// reordered + a light tier for duplicate/low-signal tail hosts) and is
+	// what makes a large target's most important findings show up first
+	// instead of only after the whole multi-hour scan finishes. "classic_order"
+	// opts back into the old module-by-module sweep.
+	prioritized := true
 	networkProfile := scanner.NetworkNormal
 	for _, m := range sentModules {
 		switch m {
-		case "prioritized":
+		case "prioritized": // accepted for backward compatibility; redundant with the new default
 			prioritized = true
+		case "classic_order":
+			prioritized = false
 		case "speed_slow":
 			speed = scanner.SpeedSlow
 		case "speed_normal":
@@ -1591,6 +1602,15 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			pruned = append(pruned, m)
 		}
 		modules = pruned
+	}
+	// A single-asset-scoped task (the "scan this asset" button) or a
+	// single-endpoint scan already targets exactly one thing — nothing to
+	// prioritize among, and ComputeAssetPriority scores the WHOLE target, so
+	// leaving this on here would silently expand a deliberately narrow scan
+	// back out to every asset in the target. Force it off regardless of any
+	// token, independent of the default/opt-out above.
+	if scopeOverride != "" || singleEndpoint {
+		prioritized = false
 	}
 
 	domainFor := func(module string) string { return webPrimary }

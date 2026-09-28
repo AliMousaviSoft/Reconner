@@ -80,13 +80,14 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   const scopeTokens = scanScope.split(/[\s,;]+/).filter(Boolean)
   const scopeIsURL = scopeTokens.length === 1 && /^https?:\/\/[^\s]+(?:\/[^\s]*|\?[^\s]*)/i.test(scanScope)
   const [singleEndpoint, setSingleEndpoint] = useState(true)
-  // Prioritized scanning: score every discovered asset (main domain always
-  // first, then WAF/tech/panel/size signals) and run the full per-asset module
-  // group on the highest-value host before moving to the next, instead of
-  // sweeping one module across every host before starting the next module.
-  // Opt-in, and only meaningful for a whole-target scan with many assets —
-  // hidden for a single-asset/single-endpoint scan, which has nothing to rank.
-  const [prioritized, setPrioritized] = useState(false)
+  // Prioritized scanning is now the DEFAULT: score every discovered asset
+  // (main domain always first, then WAF/tech/panel/size signals) and run the
+  // full per-asset module group on the highest-value host before moving to
+  // the next, instead of sweeping one module across every host first. This
+  // toggle opts BACK INTO the old module-by-module order — hidden for a
+  // single-asset/single-endpoint scan, which the backend already forces to
+  // the classic order (nothing to rank across a scope of one).
+  const [classicOrder, setClassicOrder] = useState(false)
   // Pre-scan authentication (single-domain web scans only). When subdomain
   // enumeration is NOT selected, the scan targets just this host, so we offer to
   // attach a logged-in session up front. With subdomain enum on, the scan spans
@@ -110,7 +111,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
     setSubBrute(true)
     setASNDiscovery(false)
     setSingleEndpoint(true)
-    setPrioritized(false)
+    setClassicOrder(false)
     setAuthCookie('')
     setAuthBearer('')
 		setNetworkMode(networkOnly)
@@ -245,7 +246,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
       if (!subBrute) orderedModules.push('no_subdomain_brute')
       if (asnDiscovery) orderedModules.push('asn_discovery')
       if (scopeIsURL && singleEndpoint) orderedModules.push('single_endpoint')
-      if (!asset && prioritized) orderedModules.push('prioritized')
+      if (!asset && classicOrder) orderedModules.push('classic_order')
       await startModules(orderedModules)
       addToast('success', `Scan started for ${label}`)
       onClose()
@@ -339,23 +340,24 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
           </p>
         </div>
 
-        {/* Prioritized scanning — score every discovered asset (main domain
-            always first) and run the whole per-asset module group on the
-            highest-value host before moving on, instead of one module across
-            every host. Big win on large multi-subdomain targets; hidden for a
-            single-asset scan, which has only one thing to prioritize. */}
+        {/* Prioritized scanning is now the DEFAULT (nothing to toggle on) —
+            main domain always first, then the full per-asset module group
+            runs on each host in score order instead of one module sweeping
+            every host first. This box opts BACK INTO the old module-by-
+            module order; hidden for a single-asset scan, which the backend
+            already forces to the classic order regardless. */}
         {!asset && (
-          <label className="flex items-start gap-3 rounded-lg border border-accent/30 bg-accent/[.06] p-3 cursor-pointer">
-            <input type="checkbox" checked={prioritized} onChange={e => setPrioritized(e.target.checked)}
+          <label className="flex items-start gap-3 rounded-lg border border-white/[.08] bg-white/[.02] p-3 cursor-pointer">
+            <input type="checkbox" checked={classicOrder} onChange={e => setClassicOrder(e.target.checked)}
               className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
             <span>
-              <span className="text-xs font-medium text-text-primary">Prioritized scanning <span className="text-text-muted font-normal">(highest-value asset first)</span></span>
+              <span className="text-xs font-medium text-text-primary">Classic module-by-module order <span className="text-text-muted font-normal">(disable prioritized scanning)</span></span>
               <span className="block text-[10px] text-text-muted mt-0.5">
-                Score every asset found by recon (main domain always ranks first, then WAF/tech/server/panel/size signals)
-                and run the full injection/testing pipeline on the top-ranked host before moving to the next, instead of
-                sweeping one module across every host first. Best on large targets (100s–1000s of subdomains): finds the
-                same issues faster and surfaces the most important ones first. Duplicate/wildcard-catch-all hosts get a
-                light check instead of the full pipeline.
+                By default Reconner scores every asset found by recon (main domain always first, then WAF/tech/server/panel/size
+                signals) and runs the full injection/testing pipeline on the top-ranked host before moving to the next — the
+                same issues get found, just faster and with the most important ones surfacing first. Duplicate/wildcard-catch-all
+                and low-signal tail hosts on large targets get a light check instead of the full pipeline. Turn this ON to go back
+                to the old behavior: one module swept across every host before the next module starts.
               </span>
             </span>
           </label>
