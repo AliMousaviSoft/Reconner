@@ -275,7 +275,7 @@ export const findings = {
 
 export interface AllFinding {
   id: string; target_id: string; domain: string; type: string; severity: string
-  url: string; parameter: string; confidence: number; priority: number
+  url: string; parameter: string; payload: string; confidence: number; priority: number
   status: string; evidence: string; created_at: string
 }
 

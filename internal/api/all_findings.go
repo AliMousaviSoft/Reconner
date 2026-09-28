@@ -20,6 +20,7 @@ type allFinding struct {
 	Severity   string `json:"severity"`
 	URL        string `json:"url"`
 	Parameter  string `json:"parameter"`
+	Payload    string `json:"payload"`
 	Confidence int    `json:"confidence"`
 	Priority   int    `json:"priority"`
 	Status     string `json:"status"`
@@ -38,7 +39,7 @@ func (h *Handler) handleListAllFindings(w http.ResponseWriter, r *http.Request) 
 	}
 
 	query := `SELECT f.id, f.target_id, COALESCE(t.domain,''), f.type, f.severity,
-			f.url, COALESCE(f.parameter,''),
+			f.url, COALESCE(f.parameter,''), COALESCE(f.payload,''),
 			COALESCE(f.confidence,0), COALESCE(f.priority,0), COALESCE(f.status,'finding'),
 			SUBSTR(COALESCE(f.evidence,''),1,2000), f.created_at
 		FROM vuln_findings f JOIN targets t ON t.id = f.target_id
@@ -77,7 +78,7 @@ func (h *Handler) handleListAllFindings(w http.ResponseWriter, r *http.Request) 
 	for rows.Next() {
 		var f allFinding
 		if err := rows.Scan(&f.ID, &f.TargetID, &f.Domain, &f.Type, &f.Severity,
-			&f.URL, &f.Parameter, &f.Confidence, &f.Priority, &f.Status,
+			&f.URL, &f.Parameter, &f.Payload, &f.Confidence, &f.Priority, &f.Status,
 			&f.Evidence, &f.CreatedAt); err != nil {
 			continue
 		}

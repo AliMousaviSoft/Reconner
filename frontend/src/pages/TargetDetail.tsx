@@ -140,20 +140,32 @@ const GET_PARAM_VULNS = new Set([
   'nosqli', 'idor', 'path_traversal', 'crlf', 'rfi', 'xxe',
 ])
 
+// Some detectors (blind-boolean SQLi) record a compound payload of the form
+// "TRUE=<payload> | FALSE=<payload>" — a differential needs both sides and
+// can't be reproduced by a single GET, so a raw single-value URL param would
+// be nonsense. singleValuePayload extracts the one side that actually
+// demonstrates the anomaly (FALSE) for a one-click PoC; the full compound
+// string is still shown verbatim in the Payload field alongside it.
+export function singleValuePayload(payload: string): string {
+  const m = /^TRUE=(?:.*?) \| FALSE=(.*)$/s.exec(payload)
+  return m ? m[1] : payload
+}
+
 // buildPocUrl injects the payload into `param` on top of the finding's URL and
 // returns the fully-encoded reproduction URL — the exact request that triggered
 // the finding, ready to paste in a browser or curl. Returns null when the finding
 // isn't a GET-param class or the pieces needed to rebuild the request are missing.
-function buildPocUrl(type: string, rawUrl: string, param?: string, payload?: string): string | null {
+export function buildPocUrl(type: string, rawUrl: string, param?: string, payload?: string): string | null {
   if (!rawUrl || !param || !payload) return null
+  const value = singleValuePayload(payload)
   const normalizedType = String(type || '').toLowerCase()
   if (normalizedType === 'dom_xss') {
-    if (param === 'dom:hash') return `${rawUrl.split('#', 1)[0]}#${payload}`
+    if (param === 'dom:hash') return `${rawUrl.split('#', 1)[0]}#${value}`
     if (param.startsWith('dom:') || param.startsWith('path:')) return null
   } else if (!GET_PARAM_VULNS.has(normalizedType)) return null
   try {
     const u = new URL(rawUrl)
-    u.searchParams.set(param, payload)
+    u.searchParams.set(param, value)
     return u.toString()
   } catch {
     return null
