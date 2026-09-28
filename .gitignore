@@ -30,6 +30,9 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
+# ── Claude Code local tooling state (agent worktrees, session scratch) ──
+.claude/
+
 # ── local secrets / config ──
 config.json
 config.local.json
