@@ -145,6 +145,9 @@ func RunMigrations(db *DB) error {
 		alterAssetsAddUpdatedAt,
 		createBountyIndexes,
 		createBountyProgramFavoritesTable,
+		alterTasksAddCurrentAsset,
+		alterTasksAddAssetsDone,
+		alterTasksAddAssetsTotal,
 	}
 
 	for i, m := range migrations {
@@ -1675,3 +1678,12 @@ CREATE INDEX IF NOT EXISTS idx_candidates_type ON candidates(target_id, type);
 // show a countdown per scan without recomputing it client-side.
 const alterTasksAddEta = `ALTER TABLE tasks ADD COLUMN eta_seconds INTEGER DEFAULT 0;`
 const alterTasksAddModuleEta = `ALTER TABLE tasks ADD COLUMN module_eta_seconds INTEGER DEFAULT 0;`
+
+// Per-asset progress for a prioritized scan (see scheduler's runInjectionPhasePerAsset):
+// which asset is currently being tested, how many are left, and the total —
+// mirrors current_module/progress but at the asset dimension instead of the
+// module dimension, so the target page can show "asset 12/340 (score 85)"
+// without needing a live websocket connection (e.g. after a page reload).
+const alterTasksAddCurrentAsset = `ALTER TABLE tasks ADD COLUMN current_asset TEXT DEFAULT '';`
+const alterTasksAddAssetsDone = `ALTER TABLE tasks ADD COLUMN assets_done INTEGER DEFAULT 0;`
+const alterTasksAddAssetsTotal = `ALTER TABLE tasks ADD COLUMN assets_total INTEGER DEFAULT 0;`

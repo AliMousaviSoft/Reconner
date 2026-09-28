@@ -598,7 +598,7 @@ var ErrInvalidModuleSelection = errors.New("invalid module selection")
 func scanOptionToken(module string) bool {
 	switch module {
 	case "speed_slow", "speed_normal", "speed_fast",
-		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint",
+		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized",
 		"network_fast", "network_normal", "network_deep", "full_ports":
 		return true
 	default:
@@ -665,7 +665,7 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 	}
 	for _, token := range []string{
 		"speed_slow", "speed_normal", "speed_fast", "no_subdomain_brute",
-		"asn_discovery", "no_asn_discovery", "single_endpoint",
+		"asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized",
 		ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
 		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
 		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports",
@@ -1542,9 +1542,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	subBrute := true        // slow permutation/brute phase of subdomain enum (default on)
 	asnDiscovery := false   // explicit opt-in only after program-scope/WHOIS verification
 	singleEndpoint := false // confine the whole scan to the seed URL(s) and paths under them
+	prioritized := false    // score assets, run the full per-asset module group on the highest-value host first
 	networkProfile := scanner.NetworkNormal
 	for _, m := range sentModules {
 		switch m {
+		case "prioritized":
+			prioritized = true
 		case "speed_slow":
 			speed = scanner.SpeedSlow
 		case "speed_normal":
@@ -1772,6 +1775,52 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 		// only a phase that stops making forward progress can exhaust the watchdog.
 		phaseStartedAt := time.Now()
 		modCtx, finishPhase := s.beginPhase(ctx, taskID, watchdog)
+
+		// Prioritized fast-path: on a large target, run every per-asset module as
+		// ASSET-outer/module-inner instead of module-outer/asset-inner — the
+		// complete injection pipeline runs against the highest-scored host first,
+		// then the next, rather than one module sweeping the whole target before
+		// the next module starts. Checked before the parallel-group path because
+		// most per-asset modules (ssrf/lfi/ssti/cmdi/xxe/file_upload/cachepoison/
+		// race/idor) are ALSO parallel-group members; prioritized ordering wins.
+		if prioritized && isPerAssetModule(module) {
+			group := collectPerAssetModules(modules, i, handled)
+			logFn("info", "scheduler", fmt.Sprintf("Running %d module(s) in prioritized per-asset order: %v", len(group), group))
+			for _, gm := range group {
+				s.startTaskPhase(taskID, gm)
+			}
+			results := s.runPerAssetPhase(modCtx, taskID, targetID, group, runPlannedModule, logFn)
+			skipped, timedOut := finishPhase()
+			if skipped {
+				completedModules = markModulesCompleted(completedModules, group)
+			}
+			for _, result := range results {
+				phaseStatus, reason := phaseOutcome(result.err, skipped, timedOut && result.err != nil, ctx.Err())
+				s.finishTaskPhase(taskID, result.module, phaseStatus, reason, result.duration)
+				if s.notifier != nil {
+					s.notifier.NotifyPhaseFinished(taskID, targetID, target.Domain, result.module, phaseStatus, result.duration, s.terminalTaskPhaseCount(taskID), len(modules))
+				}
+				if result.err == nil && !skipped {
+					completedModules = markModulesCompleted(completedModules, []string{result.module})
+				}
+			}
+			if skipped {
+				logFn("warn", "scheduler", fmt.Sprintf("Prioritized phase %v SKIPPED by operator — continuing to next phase.", group))
+			}
+			persistCompleted()
+			s.updateTargetStats(targetID)
+			if timedOut {
+				taskErr = fmt.Errorf("prioritized phase %v exceeded its %s watchdog and was stopped; completed results were saved", group, watchdog)
+				logFn("error", "scheduler", taskErr.Error())
+				break
+			}
+			for _, result := range results {
+				if result.err != nil && !scanner.IsPhaseBlocked(result.err) && !skipped && ctx.Err() == nil {
+					taskErr = result.err
+				}
+			}
+			continue
+		}
 
 		// Parallel fast-path: run all not-yet-handled modules in the SAME group
 		// concurrently. Grouping by id keeps group 1 (recon) and group 2
