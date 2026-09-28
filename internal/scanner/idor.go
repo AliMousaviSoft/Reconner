@@ -263,7 +263,7 @@ func (s *IDORScanner) runAuthzCrawlPipeline(ctx context.Context, targetID string
 	if err == nil {
 		for rows.Next() {
 			var u string
-			if rows.Scan(&u) == nil {
+			if rows.Scan(&u) == nil && urlHostInScope(ctx, u) {
 				seeds = append(seeds, u)
 			}
 		}
@@ -450,7 +450,7 @@ func (s *IDORScanner) collectTargets(ctx context.Context, targetID string) []ido
 	if err == nil {
 		for rows.Next() {
 			var u string
-			if rows.Scan(&u) != nil {
+			if rows.Scan(&u) != nil || !urlHostInScope(ctx, u) {
 				continue
 			}
 			if m := lastNumericSegment.FindStringSubmatch(stripQuery(u)); m != nil {
@@ -470,7 +470,7 @@ func (s *IDORScanner) collectTargets(ctx context.Context, targetID string) []ido
 	if err == nil {
 		for prows.Next() {
 			var u, p, v string
-			if prows.Scan(&u, &p, &v) != nil {
+			if prows.Scan(&u, &p, &v) != nil || !urlHostInScope(ctx, u) {
 				continue
 			}
 			// Route via the unified classifier (superset of the old idParamNames

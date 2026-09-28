@@ -250,7 +250,7 @@ func (s *SmugglingScanner) aliveRoots(ctx context.Context, targetID string) []st
 	var out []string
 	for rows.Next() {
 		var u string
-		if rows.Scan(&u) != nil {
+		if rows.Scan(&u) != nil || !urlHostInScope(ctx, u) {
 			continue
 		}
 		if b := hostBaseScan(u); b != "" && !seen[b] {
