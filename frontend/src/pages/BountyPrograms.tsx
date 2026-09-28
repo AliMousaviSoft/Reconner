@@ -6,7 +6,9 @@ import { useAuthStore } from '../store/auth'
 import { useUIStore } from '../store/ui'
 import { cn, timeAgo } from '../lib/utils'
 import type { BountyAsset, BountyProgram, BountySyncState } from '../types'
-import type { BountyProgramList } from '../lib/api'
+import type { BountyFavorite, BountyProgramList } from '../lib/api'
+
+const policyLabel: Record<string, string> = { notify: 'Notify only', light_recon: 'Notify + light recon', full_scan: 'Notify + full scan' }
 
 type Filters = {
   search: string; provider: string; bounties: string; wildcard: string; assetType: string
@@ -42,6 +44,7 @@ export default function BountyPrograms() {
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [statuses, setStatuses] = useState<BountySyncState[]>([])
+  const [favorites, setFavorites] = useState<Record<string, BountyFavorite>>({})
   const [syncing, setSyncing] = useState(false)
   const [detail, setDetail] = useState<BountyProgram | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -81,6 +84,8 @@ export default function BountyPrograms() {
   }
 
   const loadStatus = () => bountyApi.status().then(setStatuses).catch(() => {})
+  const loadFavorites = () => bountyApi.favorites().then(setFavorites).catch(() => {})
+  useEffect(() => { loadFavorites() }, [])
   useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t) }, [query])
   useEffect(() => {
     loadStatus(); const timer = setInterval(() => {
@@ -103,6 +108,29 @@ export default function BountyPrograms() {
       load()
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not fetch current program scope'); setDetail(null) }
     finally { setDetailLoading(false) }
+  }
+
+  const toggleFavorite = async (programId: string) => {
+    const wasFavorited = !!favorites[programId]
+    try {
+      if (wasFavorited) {
+        await bountyApi.removeFavorite(programId)
+        setFavorites(prev => { const next = { ...prev }; delete next[programId]; return next })
+        addToast('info', 'Removed from favorites')
+      } else {
+        await bountyApi.setFavorite(programId, 'notify')
+        addToast('success', 'Favorited — you\'ll be notified when scope changes. Set an auto-scan policy from the star menu to also queue a scan automatically.')
+        loadFavorites()
+      }
+    } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not update favorite') }
+  }
+
+  const setFavoritePolicy = async (programId: string, policy: string) => {
+    try {
+      await bountyApi.setFavorite(programId, policy, favorites[programId]?.watch_interval_hours)
+      loadFavorites()
+      addToast('success', `Auto-scan policy set to "${policyLabel[policy] || policy}"`)
+    } catch (e) { addToast('error', e instanceof Error ? e.message : 'Could not update auto-scan policy') }
   }
 
   const triggerSync = async () => {
@@ -207,7 +235,8 @@ export default function BountyPrograms() {
         <div className="card"><EmptyState title={running ? 'Catalog sync is running' : detailIndex?.running ? 'Checking unopened program scopes' : 'No programs match these filters'} description={running ? 'Lightweight provider indexes are being cached; individual scopes load on demand.' : detailIndex?.running ? 'The filtered list fills automatically as every cached program scope is checked.' : 'Clear filters, or ask an administrator to refresh the public catalogs.'} action={!running && !detailIndex?.running && user?.role === 'admin' ? <Button size="sm" onClick={triggerSync}>Start refresh</Button> : undefined}/></div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {programs.map(p => <ProgramCard key={p.id} program={p} onOpen={() => openProgram(p)} />)}
+          {programs.map(p => <ProgramCard key={p.id} program={p} favorite={favorites[p.id]} onOpen={() => openProgram(p)}
+            onToggleFavorite={() => toggleFavorite(p.id)} onChangePolicy={policy => setFavoritePolicy(p.id, policy)} />)}
         </div>
       )}
 
@@ -221,9 +250,22 @@ export default function BountyPrograms() {
                 <div className="flex items-center gap-2 flex-wrap"><span className={cn('text-[10px] px-2 py-1 rounded-md border font-semibold',providerTone(detail.provider))}>{providerLabel(detail.provider)}</span>{detail.offers_bounties ? <Badge variant="low">bounty</Badge> : <Badge>VDP</Badge>}{detail.wildcard_count > 0 && <Badge variant="medium">{detail.wildcard_count} wildcard</Badge>}{detail.safe_harbor && detail.safe_harbor !== 'none' && <Badge>{detail.safe_harbor} safe harbor</Badge>}</div>
                 <p className="mt-2 text-xs text-text-muted">{detail.description}</p>
               </div>
-              <a href={detail.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:text-accent-hover shrink-0">Open official program ↗</a>
+              <div className="flex items-center gap-2 shrink-0">
+                <button type="button" onClick={() => toggleFavorite(detail.id)} title={favorites[detail.id] ? 'Remove from favorites' : 'Favorite this program'}
+                  className={cn('text-xl leading-none', favorites[detail.id] ? 'text-severity-medium' : 'text-text-muted/40 hover:text-text-muted')}>
+                  {favorites[detail.id] ? '★' : '☆'}
+                </button>
+                <a href={detail.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:text-accent-hover">Open official program ↗</a>
+              </div>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">{[[detail.in_scope_count,'In scope'],[detail.asset_count,'All declared'],[money(detail.max_reward_cents,detail.currency),'Max reward'],[detail.started_at ? timeAgo(detail.started_at) : '—','Started']].map(([v,l])=><div key={String(l)} className="rounded-lg bg-white/[.025] border border-white/[.06] p-3 text-center"><div className="text-sm font-semibold">{v}</div><div className="text-[10px] text-text-muted mt-0.5">{l}</div></div>)}</div>
+            {favorites[detail.id] && <div className="flex items-center gap-2 text-[11px] text-text-secondary">
+              <span className="text-severity-medium">★ Watching this program</span>
+              <span>— auto-scan policy:</span>
+              <select value={favorites[detail.id].auto_scan_policy} onChange={e => setFavoritePolicy(detail.id, e.target.value)} className="bg-surface-alt border border-border rounded px-2 py-1 text-[11px] text-text-primary">
+                {Object.entries(policyLabel).map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
+              </select>
+            </div>}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">{[[detail.in_scope_count,'In scope'],[detail.asset_count,'All declared'],[detail.offers_bounties ? (detail.min_reward_cents > 0 ? `${money(detail.min_reward_cents,detail.currency)}–${money(detail.max_reward_cents,detail.currency)}` : money(detail.max_reward_cents,detail.currency)) : 'VDP','Reward range'],[detail.started_at ? timeAgo(detail.started_at) : '—','Started']].map(([v,l])=><div key={String(l)} className="rounded-lg bg-white/[.025] border border-white/[.06] p-3 text-center"><div className="text-sm font-semibold">{v}</div><div className="text-[10px] text-text-muted mt-0.5">{l}</div></div>)}</div>
             <div className="rounded-xl border border-border overflow-hidden">
               <div className="p-3 border-b border-border space-y-2">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"><p className="text-xs font-semibold">Choose project assets <span className="text-text-muted font-normal">({selected.size} selected)</span></p><div className="flex items-center gap-3 text-[11px]"><label className="flex items-center gap-1.5"><input type="checkbox" checked={paidOnly} onChange={e=>setPaidOnly(e.target.checked)} className="accent-accent"/>Bounty-eligible only</label><button onClick={toggleVisible} className="text-accent">{visibleSelected ? 'Deselect visible' : 'Select visible'}</button></div></div>
@@ -252,13 +294,30 @@ function Select({ value, onChange, options }: { value: string; onChange: (v:stri
   return <select value={value} onChange={e=>onChange(e.target.value)} className="h-9 w-full bg-surface-alt border border-border rounded-lg px-2.5 text-xs text-text-primary outline-none focus:border-accent/60">{options.map(([v,l])=><option key={v} value={v} className="bg-surface-3">{l}</option>)}</select>
 }
 
-function ProgramCard({ program:p, onOpen }: { program:BountyProgram; onOpen:()=>void }) {
-  return <button type="button" onClick={onOpen} className="card-hover p-4 text-left min-w-0">
-    <div className="flex items-start gap-3"><div className="w-10 h-10 rounded-xl border border-white/[.07] bg-white/[.03] grid place-items-center shrink-0 overflow-hidden">{p.logo_url?<img src={p.logo_url} alt="" className="w-full h-full object-contain" loading="lazy"/>:<span className="text-sm font-bold text-text-muted">{p.name.slice(0,1).toUpperCase()}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5"><h2 className="text-sm font-semibold truncate">{p.name}</h2><span className={cn('text-[9px] px-1.5 py-0.5 rounded border shrink-0',providerTone(p.provider))}>{providerLabel(p.provider)}</span></div><p className="text-[10px] text-text-muted truncate mt-0.5">{p.industry || p.handle}</p></div></div>
-    <p className="mt-3 text-[11px] text-text-secondary line-clamp-2 min-h-8">{p.description || 'Open the official scope and select assets for a project.'}</p>
-    <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-white/[.05]"><Metric value={p.details_loaded?String(p.in_scope_count):'…'} label="assets"/><Metric value={String(p.wildcard_count)} label="wildcards"/><Metric value={p.offers_bounties?money(p.max_reward_cents,p.currency):'VDP'} label="max reward"/></div>
-    <div className="flex items-center justify-between mt-3 text-[10px] text-text-muted"><span>{p.started_at?`Started ${timeAgo(p.started_at)}`:'Start date unavailable'}</span><span className="text-accent">View scope →</span></div>
-  </button>
+function ProgramCard({ program:p, favorite, onOpen, onToggleFavorite, onChangePolicy }: {
+  program:BountyProgram; favorite?: BountyFavorite; onOpen:()=>void; onToggleFavorite:()=>void; onChangePolicy:(policy:string)=>void
+}) {
+  const reward = p.offers_bounties ? (p.min_reward_cents > 0 ? `${money(p.min_reward_cents,p.currency)}–${money(p.max_reward_cents,p.currency)}` : money(p.max_reward_cents,p.currency)) : 'VDP'
+  return <div className="card-hover p-4 text-left min-w-0 relative">
+    <button type="button" onClick={e => { e.stopPropagation(); onToggleFavorite() }} title={favorite ? 'Remove from favorites' : 'Favorite — get notified (and optionally auto-scanned) on new scope'}
+      className={cn('absolute top-3 right-3 z-10 text-lg leading-none transition-colors', favorite ? 'text-severity-medium' : 'text-text-muted/40 hover:text-text-muted')}>
+      {favorite ? '★' : '☆'}
+    </button>
+    <button type="button" onClick={onOpen} className="w-full text-left">
+      <div className="flex items-start gap-3 pr-6"><div className="w-10 h-10 rounded-xl border border-white/[.07] bg-white/[.03] grid place-items-center shrink-0 overflow-hidden">{p.logo_url?<img src={p.logo_url} alt="" className="w-full h-full object-contain" loading="lazy"/>:<span className="text-sm font-bold text-text-muted">{p.name.slice(0,1).toUpperCase()}</span>}</div><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5 flex-wrap"><h2 className="text-sm font-semibold truncate">{p.name}</h2><span className={cn('text-[9px] px-1.5 py-0.5 rounded border shrink-0',providerTone(p.provider))}>{providerLabel(p.provider)}</span>{p.status && p.status !== 'live' && <span className="text-[9px] px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-text-muted shrink-0 capitalize">{p.status}</span>}</div><p className="text-[10px] text-text-muted truncate mt-0.5">{p.industry || p.handle}</p></div></div>
+      <p className="mt-3 text-[11px] text-text-secondary line-clamp-2 min-h-8">{p.description || 'Open the official scope and select assets for a project.'}</p>
+      <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-white/[.05]"><Metric value={p.details_loaded?String(p.in_scope_count):'…'} label="assets"/><Metric value={String(p.wildcard_count)} label="wildcards"/><Metric value={reward} label={p.min_reward_cents > 0 ? 'reward range' : 'max reward'}/></div>
+      <div className="flex items-center justify-between mt-3 text-[10px] text-text-muted"><span>{p.started_at?`Started ${timeAgo(p.started_at)}`:'Start date unavailable'}</span><span className="text-accent">View scope →</span></div>
+    </button>
+    {favorite && <div className="mt-3 pt-3 border-t border-white/[.05]" onClick={e => e.stopPropagation()}>
+      <label className="flex items-center gap-2 text-[10px] text-text-muted">
+        <span className="text-severity-medium">★ watching</span>
+        <select value={favorite.auto_scan_policy} onChange={e => onChangePolicy(e.target.value)} className="ml-auto bg-surface-alt border border-border rounded px-1.5 py-1 text-[10px] text-text-primary">
+          {Object.entries(policyLabel).map(([v,l]) => <option key={v} value={v} className="bg-surface-3">{l}</option>)}
+        </select>
+      </label>
+    </div>}
+  </div>
 }
 
 function Metric({value,label}:{value:string;label:string}){return <div><div className="text-xs font-semibold text-text-primary truncate">{value}</div><div className="text-[9px] text-text-muted">{label}</div></div>}

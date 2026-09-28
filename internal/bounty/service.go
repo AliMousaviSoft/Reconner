@@ -105,16 +105,24 @@ type SyncState struct {
 	FailureCount    int        `json:"failure_count"`
 }
 
+// ScopeEventNotify is called after a NEW (not deduplicated) scope event is
+// recorded -- the hook a caller (the scheduler, which alone has websocket/
+// Telegram access; this package intentionally does not import either to
+// avoid a dependency cycle) uses to alert watchers and, per their own
+// per-favorite policy, queue a follow-up scan.
+type ScopeEventNotify func(ctx context.Context, targetID, programID, eventID, eventType, identifier string)
+
 type Service struct {
-	db          *database.DB
-	client      *http.Client
-	log         *logger.Logger
-	mu          sync.Mutex
-	detailMu    sync.Mutex
-	detailLocks map[string]*sync.Mutex
-	indexMu     sync.Mutex
-	indexState  DetailIndexStatus
-	indexRetry  map[string]time.Time
+	db           *database.DB
+	client       *http.Client
+	log          *logger.Logger
+	mu           sync.Mutex
+	detailMu     sync.Mutex
+	detailLocks  map[string]*sync.Mutex
+	indexMu      sync.Mutex
+	indexState   DetailIndexStatus
+	indexRetry   map[string]time.Time
+	onScopeEvent ScopeEventNotify
 }
 
 func NewService(db *database.DB, log *logger.Logger) *Service {
@@ -126,6 +134,12 @@ func NewService(db *database.DB, log *logger.Logger) *Service {
 		log: log, detailLocks: map[string]*sync.Mutex{}, indexRetry: map[string]time.Time{},
 	}
 }
+
+// SetScopeEventNotify wires an optional callback fired for every NEWLY
+// recorded scope event (not a deduplicated repeat). Nil (the default) means
+// scope events are still recorded and still visible in the UI, just without
+// an out-of-band alert or auto-scan.
+func (s *Service) SetScopeEventNotify(fn ScopeEventNotify) { s.onScopeEvent = fn }
 
 func (s *Service) SetHTTPClient(client *http.Client) {
 	if client != nil {

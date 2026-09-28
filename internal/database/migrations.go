@@ -144,6 +144,7 @@ func RunMigrations(db *DB) error {
 		alterAssetsAddMetadata,
 		alterAssetsAddUpdatedAt,
 		createBountyIndexes,
+		createBountyProgramFavoritesTable,
 	}
 
 	for i, m := range migrations {
@@ -545,6 +546,32 @@ CREATE INDEX IF NOT EXISTS idx_bounty_assets_program_scope ON bounty_program_ass
 CREATE INDEX IF NOT EXISTS idx_project_programs_program ON project_programs(program_id, auto_sync);
 CREATE INDEX IF NOT EXISTS idx_bounty_events_pending ON bounty_scope_events(target_id, status, detected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_source ON assets(target_id, source, source_id, approval_status);
+`
+
+// createBountyProgramFavoritesTable: a per-user "watch this program" flag,
+// independent of whether the user has imported it into a project yet.
+// auto_scan_policy governs what happens when a new in-scope asset is
+// detected for a favorited program: "notify" (default, safest -- bell/
+// Telegram only), "light_recon" (queue a bounded passive+directory+tech-
+// fingerprint pass), or "full_scan" (queue the full module set). Scope
+// additions still go through the existing bounty_scope_events approval
+// pipeline; a policy beyond "notify" only decides whether THIS module
+// auto-approves and scans a newly detected asset once it is confirmed
+// in-scope, never a blanket bypass of scope checking itself.
+// user_id has no FK to users(id), matching targets.owner_id's existing
+// convention in this schema (loose ownership reference, not strictly
+// enforced -- see alterTargetsAddOwner above).
+const createBountyProgramFavoritesTable = `
+CREATE TABLE IF NOT EXISTS bounty_program_favorites (
+	user_id INTEGER NOT NULL,
+	program_id TEXT NOT NULL,
+	auto_scan_policy TEXT NOT NULL DEFAULT 'notify',
+	watch_interval_hours INTEGER NOT NULL DEFAULT 12,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (user_id, program_id),
+	FOREIGN KEY (program_id) REFERENCES bounty_programs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_bounty_favorites_program ON bounty_program_favorites(program_id);
 `
 
 // scope_override pins a task to ONE asset's value (empty = scan the whole target).

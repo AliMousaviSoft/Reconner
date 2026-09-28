@@ -224,6 +224,17 @@ export const bounty = {
   events: (targetId: string) => req<BountyScopeEvent[]>(`/targets/${targetId}/bounty-events`),
   resolveEvent: (targetId: string, eventId: string, decision: 'approve' | 'reject') =>
     req<{ status: string }>(`/targets/${targetId}/bounty-events/${eventId}`, { method: 'POST', body: JSON.stringify({ decision }) }),
+  favorites: () => req<Record<string, BountyFavorite>>('/bounty/favorites'),
+  setFavorite: (programId: string, autoScanPolicy: string, watchIntervalHours?: number) =>
+    req<{ status: string }>(`/bounty/programs/${programId}/favorite`, { method: 'POST', body: JSON.stringify({ auto_scan_policy: autoScanPolicy, watch_interval_hours: watchIntervalHours }) }),
+  removeFavorite: (programId: string) => req<{ status: string }>(`/bounty/programs/${programId}/favorite`, { method: 'DELETE' }),
+}
+
+export interface BountyFavorite {
+  program_id: string
+  auto_scan_policy: 'notify' | 'light_recon' | 'full_scan'
+  watch_interval_hours: number
+  created_at: string
 }
 
 export const findings = {

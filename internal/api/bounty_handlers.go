@@ -108,6 +108,40 @@ func (h *Handler) handleCreateProjectFromProgram(w http.ResponseWriter, r *http.
 	h.writeJSON(w, http.StatusCreated, map[string]any{"success": true, "data": map[string]string{"id": id, "url": "/targets/" + id}})
 }
 
+func (h *Handler) handleListBountyFavorites(w http.ResponseWriter, r *http.Request) {
+	favorites, err := h.bounty.ListFavorites(r.Context(), h.currentUserID(r))
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to load favorites")
+		return
+	}
+	h.writeSuccess(w, favorites)
+}
+
+func (h *Handler) handleSetBountyFavorite(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AutoScanPolicy     string `json:"auto_scan_policy"`
+		WatchIntervalHours int    `json:"watch_interval_hours"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	programID := mux.Vars(r)["programID"]
+	if err := h.bounty.SetFavorite(r.Context(), h.currentUserID(r), programID, req.AutoScanPolicy, req.WatchIntervalHours); err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.writeSuccess(w, map[string]string{"status": "favorited"})
+}
+
+func (h *Handler) handleRemoveBountyFavorite(w http.ResponseWriter, r *http.Request) {
+	if err := h.bounty.RemoveFavorite(r.Context(), h.currentUserID(r), mux.Vars(r)["programID"]); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to remove favorite")
+		return
+	}
+	h.writeSuccess(w, map[string]string{"status": "removed"})
+}
+
 func (h *Handler) handleListBountyEvents(w http.ResponseWriter, r *http.Request) {
 	events, err := h.bounty.ListScopeEvents(r.Context(), mux.Vars(r)["id"])
 	if err != nil {

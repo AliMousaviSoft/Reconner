@@ -450,7 +450,11 @@ func (s *Service) createScopeEvent(ctx context.Context, targetID, programID, ass
 	if n > 0 {
 		return
 	}
-	_, _ = s.db.ExecContext(ctx, `INSERT INTO bounty_scope_events(id,target_id,program_id,program_asset_id,event_type,identifier,old_json,new_json,status) VALUES(?,?,?,?,?,?,?,?, 'pending')`, uuid.New().String(), targetID, programID, assetID, eventType, identifier, oldJSON, newJSON)
+	eventID := uuid.New().String()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO bounty_scope_events(id,target_id,program_id,program_asset_id,event_type,identifier,old_json,new_json,status) VALUES(?,?,?,?,?,?,?,?, 'pending')`, eventID, targetID, programID, assetID, eventType, identifier, oldJSON, newJSON)
+	if err == nil && s.onScopeEvent != nil {
+		s.onScopeEvent(ctx, targetID, programID, eventID, eventType, identifier)
+	}
 }
 
 func (s *Service) ResolveScopeEvent(ctx context.Context, targetID, eventID, decision string) error {

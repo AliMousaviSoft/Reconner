@@ -245,6 +245,9 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/bounty/programs/{programID}/projects", h.requireAuth(h.handleCreateProjectFromProgram)).Methods("POST")
 	api.HandleFunc("/bounty/status", h.requireAuth(h.handleBountySyncStatus)).Methods("GET")
 	api.HandleFunc("/bounty/sync", h.requireAdmin(h.handleSyncBountyCatalog)).Methods("POST")
+	api.HandleFunc("/bounty/favorites", h.requireAuth(h.handleListBountyFavorites)).Methods("GET")
+	api.HandleFunc("/bounty/programs/{programID}/favorite", h.requireAuth(h.handleSetBountyFavorite)).Methods("POST")
+	api.HandleFunc("/bounty/programs/{programID}/favorite", h.requireAuth(h.handleRemoveBountyFavorite)).Methods("DELETE")
 	api.HandleFunc("/targets/{id}/bounty-events", h.requireAuth(h.handleListBountyEvents)).Methods("GET")
 	api.HandleFunc("/targets/{id}/bounty-events/{eventID}", h.requireAuth(h.handleResolveBountyEvent)).Methods("POST")
 

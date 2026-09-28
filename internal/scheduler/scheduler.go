@@ -285,6 +285,7 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.verifyScanner = scanner.NewVerifyScanner(db, exec, cfg, log, bc)
 	s.monitorScanner = scanner.NewMonitorScanner(db, exec, cfg, log, bc)
 	s.bountyCatalog = bounty.NewService(db, log)
+	s.bountyCatalog.SetScopeEventNotify(s.notifyBountyScopeEvent)
 
 	return s
 }
@@ -2244,6 +2245,65 @@ func (s *Scheduler) escalateIfChanged(targetID, domain string, baselineSubs int,
 	if _, err := s.CreateTaskTyped(targetID, esc, 2, monitorEscalationType); err != nil {
 		s.logger.Error("Failed to enqueue watch escalation", "target", domain, "error", err)
 	}
+}
+
+const bountyFavoriteScanType = "bounty_favorite_scan"
+
+// notifyBountyScopeEvent is bounty.Service's ScopeEventNotify hook (wired in
+// New()), fired for every NEWLY recorded scope event on ANY program,
+// favorited or not. It alerts every user watching (favoriting) the owning
+// program, then -- per the STRONGEST auto-scan policy opted into among
+// them -- auto-approves and queues a bounded follow-up scan for a newly
+// detected in-scope asset. Scope approval always goes through the existing
+// bounty_scope_events pipeline (ResolveScopeEvent); a favorite's policy only
+// decides whether this hook auto-clicks "approve" for that asset, never a
+// way to bypass scope checking itself -- and a program nobody has favorited
+// gets neither an alert nor an auto-scan, exactly like before this feature.
+func (s *Scheduler) notifyBountyScopeEvent(ctx context.Context, targetID, programID, eventID, eventType, identifier string) {
+	if s.hub != nil {
+		s.hub.Broadcast("bounty_scope_change", map[string]any{
+			"target_id": targetID, "program_id": programID, "event_type": eventType, "identifier": identifier,
+		})
+	}
+	favorites, err := s.bountyCatalog.FavoritesForProgram(ctx, programID)
+	if err != nil || len(favorites) == 0 {
+		return
+	}
+	var domain string
+	_ = s.db.QueryRow(`SELECT domain FROM targets WHERE id=?`, targetID).Scan(&domain)
+	if s.notifier != nil {
+		s.notifier.NotifyMonitorChange(targetID, domain, "bounty-"+eventType, identifier, "", "")
+	}
+	if eventType != "added" {
+		return // only a NEW in-scope asset warrants an automated follow-up scan
+	}
+	policy := "notify"
+	for _, f := range favorites {
+		if f.AutoScanPolicy == "full_scan" {
+			policy = "full_scan"
+			break
+		}
+		if f.AutoScanPolicy == "light_recon" && policy != "full_scan" {
+			policy = "light_recon"
+		}
+	}
+	if policy == "notify" {
+		return
+	}
+	if err := s.bountyCatalog.ResolveScopeEvent(ctx, targetID, eventID, "approve"); err != nil {
+		s.logger.Warn("Favorite auto-scan could not approve new bounty scope", "target", targetID, "event", eventID, "error", err)
+		return
+	}
+	modules := []string{ModuleHTTPProbe, ModuleTakeover, ModuleBackupDiscovery, ModuleDirDiscovery, ModuleNuclei}
+	if policy == "full_scan" {
+		modules = AllModules
+	}
+	task, err := s.createTask(targetID, modules, 2, bountyFavoriteScanType, identifier)
+	if err != nil {
+		s.logger.Warn("Favorite auto-scan could not queue follow-up", "target", targetID, "asset", identifier, "error", err)
+		return
+	}
+	s.logger.Info("Favorite auto-scan queued for new bounty asset", "target", targetID, "asset", identifier, "policy", policy, "task", task.ID)
 }
 
 // runModule dispatches a single module by name. Shared by the sequential and
