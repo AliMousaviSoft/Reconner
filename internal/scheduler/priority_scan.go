@@ -44,6 +44,19 @@ var lightTierModuleSet = map[string]bool{
 	ModuleNuclei: true, ModuleExposure: true, ModuleCORS: true,
 }
 
+// lightTierScoreThreshold marks the tail of the priority order — a live host
+// with no admin panel, no interesting name pattern, no discovered parameter
+// surface, no high-yield technology and nothing beyond "it responded" scores
+// in single digits here (a dead host scores far below zero). Reordering by
+// itself does not shrink a deep scan's wall-clock cost on a 1000-subdomain
+// target; without a depth cutoff the tail still silently eats the full
+// per-asset module group for near-zero expected yield. Below this score, an
+// asset gets lightTierModuleSet instead — same treatment as a duplicate/
+// wildcard-catch-all host — UNLESS the requested module group has no
+// light-tier overlap, in which case it keeps the full group rather than ever
+// running zero modules on a real, distinct, live asset.
+const lightTierScoreThreshold = 15
+
 func isPerAssetModule(module string) bool { return perAssetModuleSet[module] }
 
 // collectPerAssetModules gathers every not-yet-handled per-asset module from
@@ -104,6 +117,13 @@ func (s *Scheduler) runPerAssetPhase(ctx context.Context, taskID, targetID strin
 		return finalizePerAssetResults(results, group)
 	}
 
+	var light []string
+	for _, m := range group {
+		if lightTierModuleSet[m] {
+			light = append(light, m)
+		}
+	}
+
 	type assetWork struct {
 		host    string
 		score   int
@@ -111,24 +131,28 @@ func (s *Scheduler) runPerAssetPhase(ctx context.Context, taskID, targetID strin
 	}
 	var work []assetWork
 	for _, a := range plan.Ordered {
-		work = append(work, assetWork{host: a.Host, score: a.Score, modules: group})
+		mods := group
+		if !a.IsMainDomain && a.Score < lightTierScoreThreshold && len(light) > 0 {
+			mods = light
+		}
+		work = append(work, assetWork{host: a.Host, score: a.Score, modules: mods})
 	}
 	for _, d := range plan.Duplicates {
-		var light []string
-		for _, m := range group {
-			if lightTierModuleSet[m] {
-				light = append(light, m)
-			}
-		}
 		if len(light) > 0 {
 			work = append(work, assetWork{host: d.Host, score: d.Score, modules: light})
 		}
 	}
 
+	fullCount := 0
+	for _, aw := range work {
+		if len(aw.modules) == len(group) {
+			fullCount++
+		}
+	}
 	total := len(work)
 	logFn("info", "scheduler", fmt.Sprintf(
-		"Prioritized scan: %d asset(s) scored (%d full pipeline, %d duplicate/catch-all on the light tier) — running %v per asset, highest-value first.",
-		total, len(plan.Ordered), len(plan.Duplicates), group))
+		"Prioritized scan: %d asset(s) scored (%d full pipeline, %d on the light tier — tail/duplicate/catch-all hosts) — running %v per asset, highest-value first.",
+		total, fullCount, total-fullCount, group))
 
 	started := time.Now()
 	for i, aw := range work {

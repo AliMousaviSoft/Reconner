@@ -127,6 +127,69 @@ func TestRunPerAssetPhaseGivesDuplicatesOnlyTheLightTier(t *testing.T) {
 	}
 }
 
+// A real, distinct, low-signal tail asset (alive, but no admin panel, no
+// interesting name, no params, no high-yield tech — score far below a real
+// app-shaped host) must get only the light tier, not the full module group,
+// even though it is nobody's duplicate. This is what actually shrinks a deep
+// scan's wall-clock cost on a 1000-subdomain target: ordering alone still lets
+// every tail host eat the full pipeline unless depth is cut too.
+func TestRunPerAssetPhaseGivesLowScoreTailAssetsOnlyTheLightTier(t *testing.T) {
+	s := newTestScheduler(t)
+	tid := uuid.NewString()
+	if _, err := s.db.Exec(`INSERT INTO targets (id,domain) VALUES (?,?)`, tid, "example.test"); err != nil {
+		t.Fatal(err)
+	}
+	// admin.example.test: interesting name + admin panel → clearly above threshold.
+	// cdn7.example.test: alive, generic title, no other signal → clearly below threshold.
+	if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code,page_title) VALUES
+		(?,?,?,1,200,'Admin Login'),
+		(?,?,?,1,200,'')`,
+		uuid.NewString(), tid, "admin.example.test",
+		uuid.NewString(), tid, "cdn7.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	taskID := uuid.NewString()
+	if _, err := s.db.Exec(`INSERT INTO tasks (id,target_id,type,status,modules,total) VALUES (?,?,?,?,?,?)`,
+		taskID, tid, "full_scan", "running", "[]", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var calls []string
+	stubRun := func(ctx context.Context, module string) error {
+		var host string
+		_ = s.db.QueryRow(`SELECT current_asset FROM tasks WHERE id=?`, taskID).Scan(&host)
+		mu.Lock()
+		calls = append(calls, host+"::"+module)
+		mu.Unlock()
+		return nil
+	}
+
+	group := []string{ModuleNuclei, ModuleSQLi} // nuclei is in the light tier, sqli is not
+	s.runPerAssetPhase(context.Background(), taskID, tid, group, stubRun, func(string, string, string) {})
+
+	has := func(call string) bool {
+		for _, c := range calls {
+			if c == call {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("admin.example.test::" + ModuleSQLi) {
+		t.Fatalf("expected the high-score admin asset to get the full pipeline (sqli), got calls: %v", calls)
+	}
+	if !has("admin.example.test::" + ModuleNuclei) {
+		t.Fatalf("expected the high-score admin asset to also get nuclei, got calls: %v", calls)
+	}
+	if has("cdn7.example.test::" + ModuleSQLi) {
+		t.Fatalf("expected the low-score tail asset to be downgraded off sqli (full tier), got calls: %v", calls)
+	}
+	if !has("cdn7.example.test::" + ModuleNuclei) {
+		t.Fatalf("expected the low-score tail asset to still get the light tier (nuclei), got calls: %v", calls)
+	}
+}
+
 // End-to-end wiring: a task created with the "prioritized" token must reach
 // the per-asset branch inside executeTask (not silently fall back to the
 // ordinary path) and still finish cleanly through the real module dispatch —

@@ -354,7 +354,7 @@ func scoreAsset(row assetRow, targetDomain string) AssetScore {
 	}
 	labelLower := strings.ToLower(label)
 	for _, tok := range interestingLabelTokens {
-		if strings.Contains(labelLower, tok) {
+		if labelMatchesInterestingToken(labelLower, tok) {
 			add(25, "interesting name pattern: "+tok)
 			break // one bonus per host, not one per matching token
 		}
@@ -421,6 +421,41 @@ func scoreAsset(row assetRow, targetDomain string) AssetScore {
 	}
 
 	return AssetScore{Host: row.host, Score: score, Reasons: reasons, IsMainDomain: isMain}
+}
+
+// labelMatchesInterestingToken decides whether a subdomain label earns the
+// "interesting name pattern" bonus for tok. Longer tokens ("admin",
+// "payment", "staging") keep plain substring matching, since a compound
+// label like "adminportal" or "paymentgateway" is exactly the kind of host
+// this bonus should catch. Tokens of 3 characters or fewer ("cd", "ci") are
+// too short for that: "cd" substring-matches "cdn7" and would hand a
+// low-value CDN node the SAME +25 "interesting" bonus meant for a real CI/CD
+// host, cancelling its own -15 low-value demotion and defeating the tiered-
+// depth cutoff that exists specifically to skip the full pipeline on hosts
+// like it. Short tokens instead require a whole delimited segment match
+// (e.g. "cd.example.com" or "my-cd-box", but not "cdn7").
+func labelMatchesInterestingToken(label, tok string) bool {
+	if len(tok) > 3 {
+		return strings.Contains(label, tok)
+	}
+	idx := strings.Index(label, tok)
+	for idx != -1 {
+		before := idx == 0 || !isLabelWordByte(label[idx-1])
+		after := idx+len(tok) >= len(label) || !isLabelWordByte(label[idx+len(tok)])
+		if before && after {
+			return true
+		}
+		next := strings.Index(label[idx+1:], tok)
+		if next == -1 {
+			break
+		}
+		idx = idx + 1 + next
+	}
+	return false
+}
+
+func isLabelWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 func looksLikeBareTechArray(techJSON string) bool {

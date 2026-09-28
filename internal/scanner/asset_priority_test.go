@@ -153,6 +153,39 @@ func TestComputeAssetPriorityDedupesWildcardHosts(t *testing.T) {
 	}
 }
 
+// A short interesting-name token like "cd" (meant for an exact "cd.example.
+// test" CI/CD host) must NOT substring-match inside an unrelated low-value
+// host like "cdn7.example.test" — that would hand a CDN node the same +25
+// "interesting" bonus a real CI/CD host gets, cancelling its own low-value
+// demotion and defeating the light-tier cutoff that exists to skip the full
+// pipeline on exactly this kind of host.
+func TestComputeAssetPriorityShortTokenRequiresWordBoundary(t *testing.T) {
+	db, tid := testDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE targets SET domain=? WHERE id=?`, "example.test", tid); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(q string, args ...any) error { _, err := db.Exec(q, args...); return err }
+
+	seedSubdomain(t, tid, exec, "cdn7.example.test", true, 200, "", "", "[]", "", "dns")
+	seedSubdomain(t, tid, exec, "cd.example.test", true, 200, "", "", "[]", "", "dns")
+
+	plan, err := ComputeAssetPriority(context.Background(), db, tid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scores := map[string]int{}
+	for _, a := range plan.Ordered {
+		scores[a.Host] = a.Score
+	}
+	if scores["cd.example.test"] <= scores["cdn7.example.test"] {
+		t.Fatalf("exact 'cd' host should score above the merely-substring 'cdn7' host: %+v", scores)
+	}
+	if scores["cdn7.example.test"] >= 15 {
+		t.Fatalf("cdn7 must stay below the light-tier score threshold (no bogus 'cd' interesting bonus), got %d", scores["cdn7.example.test"])
+	}
+}
+
 // A host with no title at all (or a generic server-default title) must never
 // be folded into another host just because they share status/server — the
 // grouping signal is too weak to trust without real content to compare.

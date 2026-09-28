@@ -327,6 +327,7 @@ func (h *Handler) handleListTasks(w http.ResponseWriter, r *http.Request) {
 
 	query := `SELECT t.id, t.target_id, t.type, t.status, t.priority, t.progress, t.total,
 		t.current_module, COALESCE(t.eta_seconds,0), COALESCE(t.module_eta_seconds,0), t.modules, COALESCE(t.completed_modules,'[]'), t.error, t.started_at, t.finished_at, t.created_at, t.updated_at,
+		COALESCE(t.current_asset,''), COALESCE(t.assets_done,0), COALESCE(t.assets_total,0),
 		tgt.domain, COALESCE(tgt.name,'')
 		FROM tasks t JOIN targets tgt ON tgt.id = t.target_id
 		WHERE 1=1`
@@ -364,7 +365,7 @@ func (h *Handler) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		var modulesJSON, completedJSON string
 		err := rows.Scan(&t.ID, &t.TargetID, &t.Type, &t.Status, &t.Priority,
 			&t.Progress, &t.Total, &t.CurrentModule, &t.EtaSeconds, &t.ModuleEtaSeconds, &modulesJSON, &completedJSON, &t.Error,
-			&startedAt, &finishedAt, &t.CreatedAt, &t.UpdatedAt, &t.TargetDomain, &t.Name)
+			&startedAt, &finishedAt, &t.CreatedAt, &t.UpdatedAt, &t.CurrentAsset, &t.AssetsDone, &t.AssetsTotal, &t.TargetDomain, &t.Name)
 		if err != nil {
 			continue
 		}
@@ -399,11 +400,12 @@ func (h *Handler) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRowContext(r.Context(), `
 		SELECT t.id, t.target_id, t.type, t.status, t.priority, t.progress, t.total,
 			t.current_module, COALESCE(t.eta_seconds,0), COALESCE(t.module_eta_seconds,0), t.modules, COALESCE(t.completed_modules,'[]'), t.error, t.started_at, t.finished_at, t.created_at, t.updated_at,
+			COALESCE(t.current_asset,''), COALESCE(t.assets_done,0), COALESCE(t.assets_total,0),
 			tgt.domain, COALESCE(tgt.name,'')
 		FROM tasks t JOIN targets tgt ON tgt.id = t.target_id WHERE t.id = ?
 	`, id).Scan(&t.ID, &t.TargetID, &t.Type, &t.Status, &t.Priority,
 		&t.Progress, &t.Total, &t.CurrentModule, &t.EtaSeconds, &t.ModuleEtaSeconds, &modulesJSON, &completedJSON, &t.Error,
-		&startedAt, &finishedAt, &t.CreatedAt, &t.UpdatedAt, &t.TargetDomain, &t.Name)
+		&startedAt, &finishedAt, &t.CreatedAt, &t.UpdatedAt, &t.CurrentAsset, &t.AssetsDone, &t.AssetsTotal, &t.TargetDomain, &t.Name)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "task not found")
 		return

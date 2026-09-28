@@ -225,6 +225,11 @@ type Task struct {
 	EtaSeconds       int      `json:"eta_seconds"`
 	ModuleEtaSeconds int      `json:"module_eta_seconds"`
 	Modules          []string `json:"modules"`
+	// CurrentAsset / AssetsDone / AssetsTotal: live pointer into a prioritized
+	// scan's asset-ordered queue (empty/zero outside a "prioritized" task).
+	CurrentAsset string `json:"current_asset,omitempty"`
+	AssetsDone   int    `json:"assets_done,omitempty"`
+	AssetsTotal  int    `json:"assets_total,omitempty"`
 	// CompletedModules is the subset of Modules that must not be re-run: phases
 	// that finished successfully or were explicitly skipped by the operator.
 	CompletedModules []string   `json:"completed_modules"`

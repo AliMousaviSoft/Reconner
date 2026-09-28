@@ -320,6 +320,7 @@ export default function TargetDetail() {
   const [lastFailedTask, setLastFailedTask] = useState<Task | null>(null)
   const [resuming, setResuming] = useState(false)
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const findingRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -424,6 +425,22 @@ export default function TargetDetail() {
           targetsApi.get(id!).then(t => { setTarget(t); setIsScanning(t.scan_status === 'running') }).catch(() => {})
         }, 3000)
       }
+    })
+  }, [id, tab])
+
+  // Findings must appear the instant a detector confirms them, not only when a
+  // module happens to finish — a prioritized scan can spend a long time inside
+  // one module group (running it asset by asset), so waiting for task_progress
+  // would leave the vulns tab stale for the whole phase. Every detector already
+  // broadcasts new_vuln_finding the moment it records a finding; debounce-reload
+  // so a burst of findings coalesces into one reload instead of one per finding.
+  useEffect(() => {
+    if (tab !== 'vulns' && tab !== 'candidates') return
+    return ws.on('new_vuln_finding', (payload) => {
+      const p = payload as { target_id: string }
+      if (p.target_id !== id) return
+      if (findingRefreshTimerRef.current) clearTimeout(findingRefreshTimerRef.current)
+      findingRefreshTimerRef.current = setTimeout(() => loadTab(tab), 1200)
     })
   }, [id, tab])
 

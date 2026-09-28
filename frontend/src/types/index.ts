@@ -338,6 +338,9 @@ export interface Task {
   module_eta_seconds?: number
   modules: string[]
   completed_modules: string[]
+  current_asset?: string
+  assets_done?: number
+  assets_total?: number
   error: string
   started_at: string | null
   finished_at: string | null
