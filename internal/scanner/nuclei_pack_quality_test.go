@@ -17,6 +17,10 @@ func TestReconnerNucleiTemplatesUseHighSignalProofs(t *testing.T) {
 		"composer-auth-exposure.yaml":   {"application/json", "username|password", "condition: and"},
 		"npmrc-auth-exposure.yaml":      {"_authToken|_auth", "condition: and"},
 		"svn-wcdb-exposure.yaml":        {"type: binary", "53514c69746520666f726d6174203300"},
+		// The bare word matchers ("services:", "image:") used to fire on any
+		// unrelated JSON/YAML response mentioning both terms; must now be
+		// anchored to real YAML structure and exclude JSON responses too.
+		"docker-compose-exposure.yaml": {"^services:", "condition: and", "application/json"},
 	}
 	for name, proofs := range required {
 		raw, err := reconnerTemplateFS.ReadFile("nucleitemplates/" + name)

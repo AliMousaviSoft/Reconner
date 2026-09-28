@@ -13,11 +13,16 @@ http:
     stop-at-first-match: true
     matchers-condition: and
     matchers:
-      - type: word
+      # Anchored to real YAML structure (top-level "services:" key, a nested
+      # "image:" directive under a service entry) rather than a bare word
+      # match — "services:" and "image:" alone are common enough in
+      # unrelated JSON/YAML API responses (a "services" listing, a product
+      # "image" field) to false-positive on non-Compose content.
+      - type: regex
         part: body
-        words:
-          - "services:"
-          - "image:"
+        regex:
+          - "(?m)^services:\\s*$"
+          - "(?m)^\\s+image:\\s*\\S+"
         condition: and
       - type: status
         status:
@@ -26,4 +31,5 @@ http:
         part: header
         words:
           - "text/html"
+          - "application/json"
         negative: true
