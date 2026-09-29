@@ -66,6 +66,21 @@ func isMediumPlus(severity string) bool {
 	return false
 }
 
+// dropLowInfo filters "low"/"info" out of an explicit severity list, so the
+// medium+ floor enforced in runNucleiProcess can never be bypassed by a
+// caller passing severity=[]string{"info","low",...} directly.
+func dropLowInfo(severity []string) []string {
+	kept := make([]string, 0, len(severity))
+	for _, sv := range severity {
+		switch strings.ToLower(strings.TrimSpace(sv)) {
+		case "low", "info":
+			continue
+		}
+		kept = append(kept, sv)
+	}
+	return kept
+}
+
 func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []string, tags []string, logFn LogFunc) error {
 	if !s.exec.IsToolAvailable("nuclei") {
 		logFn("warn", "nuclei", "nuclei is unavailable; this phase cannot provide vulnerability-template coverage")
@@ -424,19 +439,18 @@ func (s *NucleiScanner) runNucleiProcess(ctx context.Context, targetID string, t
 		args = append(args, "-no-interactsh")
 	}
 
-	if len(severity) > 0 {
-		args = append(args, "-severity", strings.Join(severity, ","))
-	} else if s.cfg.NucleiIncludeLowInfo {
-		// Operator explicitly opted back in to the noisy info+low tiers.
-		args = append(args, "-severity", "info,low,medium,high,critical")
-	} else {
-		// Default: medium/high/critical ONLY. Low was dropped per operator
-		// request — the low tier is dominated by best-practice/informational
-		// noise (missing headers, weak ciphers, SSL posture, verbose banners)
-		// that buried the real findings. Re-enable low+info with
-		// NucleiIncludeLowInfo ("nuclei_include_low_info": true) if needed.
-		args = append(args, "-severity", "medium,high,critical")
+	// medium/high/critical ONLY — info/low templates are never even loaded, let
+	// alone executed. The info/low tiers are dominated by best-practice/
+	// informational noise (missing headers, weak ciphers, SSL posture, verbose
+	// banners) that buried the real findings; there is no opt-in to re-enable
+	// them, by design. dropLowInfo strips any low/info value a caller might
+	// still pass in explicitly, so this floor can't be bypassed via the
+	// severity parameter either.
+	effSeverity := dropLowInfo(severity)
+	if len(effSeverity) == 0 {
+		effSeverity = []string{"medium", "high", "critical"}
 	}
+	args = append(args, "-severity", strings.Join(effSeverity, ","))
 
 	if len(tags) > 0 {
 		args = append(args, "-tags", strings.Join(tags, ","))
@@ -524,11 +538,14 @@ func (s *NucleiScanner) runNucleiProcess(ctx context.Context, targetID string, t
 			return
 		}
 
-		// FINDINGS stay HIGH-SIGNAL: skip the info/low tiers unless opted in, and
-		// drop detection-only noise (tech/waf/tls/dns/header fingerprints) — those
-		// live as candidates, never as standalone findings. This is the biggest
-		// nuclei false-positive cut.
-		if !s.cfg.NucleiIncludeLowInfo && !actionableSev {
+		// FINDINGS stay HIGH-SIGNAL: skip the info/low/unknown tiers entirely —
+		// no opt-in — and drop detection-only noise (tech/waf/tls/dns/header
+		// fingerprints) — those live as candidates, never as standalone
+		// findings. This is the biggest nuclei false-positive cut. In practice
+		// out.Info.Severity is never info/low here since the -severity floor
+		// above stops nuclei from ever matching those templates; this is the
+		// backstop for a template that mislabels its own severity.
+		if !actionableSev {
 			return
 		}
 		if nucleiNoisyTemplate(out.TemplateID, out.Info.Tags) {

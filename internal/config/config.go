@@ -94,10 +94,6 @@ type Config struct {
 	QuakeAPIKey      string `json:"quake_api_key"`      // 360 Quake token
 	ZoomEyeAPIKey    string `json:"zoomeye_api_key"`    // ZoomEye API key
 	VirusTotalAPIKey string `json:"virustotal_api_key"` // VirusTotal v3 key
-	// NucleiIncludeLowInfo opts the nuclei module back into the noisy info/low
-	// severity tiers. Off by default per the scanning spec: only medium/high/
-	// critical are scanned and persisted, keeping findings actionable.
-	NucleiIncludeLowInfo bool `json:"nuclei_include_low_info"`
 	// VerifySecrets enables active verification of discovered API keys against
 	// their providers (AWS, Slack, GitHub, Stripe, SendGrid). This uses the
 	// keys LEAKED ON THE TARGET — it never requires any key from you. Off by
