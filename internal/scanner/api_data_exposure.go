@@ -105,7 +105,14 @@ func (s *APIDataExposureScanner) Run(ctx context.Context, targetID string, logFn
 	jobs := make(chan *apiDataEndpoint)
 	var wg sync.WaitGroup
 	var findingCount, requestCount atomic.Int64
-	workers := 6
+	// 6 endpoint workers made this a ~10-minute crawl on a large API surface
+	// (≈2000 endpoints, ~5 benign GET/OPTIONS/POST probes each). Raise to 10 for
+	// throughput. Kept deliberately moderate rather than high because a big API
+	// surface often concentrates on a few hosts and these probes are not per-host
+	// throttled — 10 concurrent benign reads is comfortable for a real API host
+	// while still cutting the wall-clock, and the total request budget is
+	// unchanged (loadAPIDataSurface already caps the endpoint set).
+	workers := 10
 	if len(endpoints) < workers {
 		workers = len(endpoints)
 	}
