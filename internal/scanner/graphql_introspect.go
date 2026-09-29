@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,49 +51,74 @@ func (s *ParamScanner) harvestGraphQL(ctx context.Context, targetID string, targ
 		}
 	}
 
-	ops, stored := 0, 0
 	corpusDir := ""
 	if s.cfg != nil {
 		corpusDir = s.cfg.WordlistsDir
 	}
 	paths := LoadCorpus(corpusDir, "graphql", graphqlPaths)
+
+	// Probe origins CONCURRENTLY — this was a fully serial origins × paths loop
+	// of 8s-timeout POSTs that spent many minutes on a large target. Origins are
+	// independent hosts; a bounded worker pool gives identical coverage (same
+	// endpoints tried, same schemas found, still stop at the first live endpoint
+	// per origin) at a fraction of the wall-clock.
+	originList := make([]string, 0, len(origins))
 	for origin := range origins {
+		originList = append(originList, origin)
+	}
+
+	var (
+		ops, stored atomic.Int64
+		wg          sync.WaitGroup
+	)
+	sem := make(chan struct{}, 16)
+	for _, origin := range originList {
 		if ctx.Err() != nil {
 			break
 		}
-		for _, gp := range paths {
-			endpoint := origin + gp
-			body := s.introspect(ctx, client, endpoint)
-			if body == nil {
-				continue
-			}
-			operations := parseGraphQLOperations(body)
-			if len(operations) == 0 {
-				continue
-			}
-			logFn("warn", "param_discovery", fmt.Sprintf(
-				"GraphQL introspection ENABLED at %s — %d operation(s) exposed (introspection should be disabled in production).",
-				endpoint, len(operations)))
-			for _, op := range operations {
-				ops++
-				for _, arg := range op.Args {
-					selection := "object"
-					if op.Scalar {
-						selection = "scalar"
-					}
-					loc := "graphql:" + op.Kind + ":" + op.Name + ":" + arg + ":" + selection
-					if s.storeGraphQLParameter(targetID, endpoint, op.Name+"."+arg, loc) {
-						stored++
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(origin string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			for _, gp := range paths {
+				if ctx.Err() != nil {
+					return
+				}
+				endpoint := origin + gp
+				body := s.introspect(ctx, client, endpoint)
+				if body == nil {
+					continue
+				}
+				operations := parseGraphQLOperations(body)
+				if len(operations) == 0 {
+					continue
+				}
+				logFn("warn", "param_discovery", fmt.Sprintf(
+					"GraphQL introspection ENABLED at %s — %d operation(s) exposed (introspection should be disabled in production).",
+					endpoint, len(operations)))
+				for _, op := range operations {
+					ops.Add(1)
+					for _, arg := range op.Args {
+						selection := "object"
+						if op.Scalar {
+							selection = "scalar"
+						}
+						loc := "graphql:" + op.Kind + ":" + op.Name + ":" + arg + ":" + selection
+						if s.storeGraphQLParameter(targetID, endpoint, op.Name+"."+arg, loc) {
+							stored.Add(1)
+						}
 					}
 				}
+				return // one live GraphQL endpoint per origin is enough
 			}
-			break // one live GraphQL endpoint per origin is enough
-		}
+		}(origin)
 	}
-	if ops > 0 {
-		logFn("info", "param_discovery", fmt.Sprintf("GraphQL harvest: %d operation(s) → %d parameter(s) stored.", ops, stored))
+	wg.Wait()
+	if n := ops.Load(); n > 0 {
+		logFn("info", "param_discovery", fmt.Sprintf("GraphQL harvest: %d operation(s) → %d parameter(s) stored.", n, stored.Load()))
 	}
-	return ops
+	return int(ops.Load())
 }
 
 // introspect POSTs the introspection query and returns the body only if the

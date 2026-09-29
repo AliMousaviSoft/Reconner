@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -70,82 +72,109 @@ func (s *ParamScanner) harvestAPISpecs(ctx context.Context, targetID string, tar
 		}
 	}
 
-	endpoints, stored := 0, 0
 	corpusDir := ""
 	if s.cfg != nil {
 		corpusDir = s.cfg.WordlistsDir
 	}
 	paths := LoadCorpus(corpusDir, "api_spec", apiSpecPaths)
+
+	// Probe origins CONCURRENTLY. This was a fully serial nested loop
+	// (origins × spec paths, each an 8s-timeout GET), so on a large target it
+	// spent many minutes walking hundreds of 404s one at a time. Origins are
+	// independent hosts, so a bounded worker pool cuts the wall-clock by the
+	// worker count with identical coverage (same paths, same specs found) — the
+	// per-host request pattern (try paths in order, stop at the first real spec)
+	// is unchanged.
+	originList := make([]string, 0, len(origins))
 	for origin := range origins {
+		originList = append(originList, origin)
+	}
+
+	var (
+		endpoints, stored atomic.Int64
+		wg                sync.WaitGroup
+	)
+	sem := make(chan struct{}, 16)
+	for _, origin := range originList {
 		if ctx.Err() != nil {
 			break
 		}
-		for _, sp := range paths {
-			body := s.fetchSpec(ctx, client, origin+sp)
-			if body == nil {
-				continue
-			}
-			eps := parseAPISpec(body, origin)
-			if len(eps) == 0 {
-				continue
-			}
-			logFn("info", "param_discovery", fmt.Sprintf("OpenAPI/Swagger spec found at %s%s — %d endpoint(s).", origin, sp, len(eps)))
-			for _, ep := range eps {
-				endpoints++
-				for _, p := range ep.Path {
-					method := ep.Method
-					if method == "" {
-						method = "GET"
-					}
-					if s.storeParameter(targetID, paramEntry{URL: ep.URL, Param: p.Name, Value: "1", Source: "openapi", Method: method, Location: "path:" + itoa(p.Index)}) == nil {
-						stored++
-					}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(origin string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			for _, sp := range paths {
+				if ctx.Err() != nil {
+					return
 				}
-				for _, q := range ep.Query {
-					sep := "?"
-					if strings.Contains(ep.URL, "?") {
-						sep = "&"
-					}
-					method := ep.Method
-					if method == "" {
-						method = "GET"
-					}
-					if s.storeParameter(targetID, paramEntry{URL: ep.URL + sep + q + "=", Param: q, Value: "", Source: "openapi", Method: method, Location: "query"}) == nil {
-						stored++
-					}
+				body := s.fetchSpec(ctx, client, origin+sp)
+				if body == nil {
+					continue
 				}
-				if len(ep.Body) > 0 {
-					ct := ep.ContentType
-					if ct == "" {
-						ct = "application/x-www-form-urlencoded"
-					}
-					if ep.JSON && ep.ContentType == "" {
-						ct = "application/json"
-					}
-					method := ep.Method
-					if method == "" || method == "GET" {
-						method = "POST"
-					}
-					for _, b := range ep.Body {
-						storedOK := false
-						if strings.Contains(ct, "json") {
-							storedOK = s.storeJSONParameter(targetID, ep.URL, b, ep.BodyTypes[b], method, ct)
-						} else {
-							storedOK = s.storeFormParameter(targetID, ep.URL, b, method, ct)
+				eps := parseAPISpec(body, origin)
+				if len(eps) == 0 {
+					continue
+				}
+				logFn("info", "param_discovery", fmt.Sprintf("OpenAPI/Swagger spec found at %s%s — %d endpoint(s).", origin, sp, len(eps)))
+				for _, ep := range eps {
+					endpoints.Add(1)
+					for _, p := range ep.Path {
+						method := ep.Method
+						if method == "" {
+							method = "GET"
 						}
-						if storedOK {
-							stored++
+						if s.storeParameter(targetID, paramEntry{URL: ep.URL, Param: p.Name, Value: "1", Source: "openapi", Method: method, Location: "path:" + itoa(p.Index)}) == nil {
+							stored.Add(1)
 						}
 					}
+					for _, q := range ep.Query {
+						sep := "?"
+						if strings.Contains(ep.URL, "?") {
+							sep = "&"
+						}
+						method := ep.Method
+						if method == "" {
+							method = "GET"
+						}
+						if s.storeParameter(targetID, paramEntry{URL: ep.URL + sep + q + "=", Param: q, Value: "", Source: "openapi", Method: method, Location: "query"}) == nil {
+							stored.Add(1)
+						}
+					}
+					if len(ep.Body) > 0 {
+						ct := ep.ContentType
+						if ct == "" {
+							ct = "application/x-www-form-urlencoded"
+						}
+						if ep.JSON && ep.ContentType == "" {
+							ct = "application/json"
+						}
+						method := ep.Method
+						if method == "" || method == "GET" {
+							method = "POST"
+						}
+						for _, b := range ep.Body {
+							storedOK := false
+							if strings.Contains(ct, "json") {
+								storedOK = s.storeJSONParameter(targetID, ep.URL, b, ep.BodyTypes[b], method, ct)
+							} else {
+								storedOK = s.storeFormParameter(targetID, ep.URL, b, method, ct)
+							}
+							if storedOK {
+								stored.Add(1)
+							}
+						}
+					}
 				}
+				return // one spec per origin is plenty
 			}
-			break // one spec per origin is plenty
-		}
+		}(origin)
 	}
-	if endpoints > 0 {
-		logFn("info", "param_discovery", fmt.Sprintf("API-spec harvest: %d endpoint(s) → %d parameter(s) stored.", endpoints, stored))
+	wg.Wait()
+	if n := endpoints.Load(); n > 0 {
+		logFn("info", "param_discovery", fmt.Sprintf("API-spec harvest: %d endpoint(s) → %d parameter(s) stored.", n, stored.Load()))
 	}
-	return endpoints
+	return int(endpoints.Load())
 }
 
 // fetchSpec GETs a candidate spec URL and returns the body only if it actually
