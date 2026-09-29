@@ -74,7 +74,11 @@ func TestTryBrowserlessExecPayloadFallsBackToWAFBypassWhenBlocked(t *testing.T) 
 		w.Header().Set("Content-Type", "text/html")
 		if strings.Contains(q, "alert(document.domain)") {
 			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte("Access Denied - request blocked by the firewall"))
+			// A genuinely WAF-specific signature (not the generic "Access
+			// Denied" phrase an ordinary app's own auth-failure page also
+			// uses — see waf.go's wafBlockBodySignatures for why that bare
+			// phrase was removed from the block-page detector).
+			_, _ = w.Write([]byte("Sucuri Website Firewall - your request has been blocked"))
 			return
 		}
 		_, _ = w.Write([]byte("<html><body>hi " + q + " bye</body></html>"))

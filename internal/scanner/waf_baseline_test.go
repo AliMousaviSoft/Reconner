@@ -13,10 +13,21 @@ func TestLooksLikeWAFBlock(t *testing.T) {
 		{"cloudflare attention", 403, "Attention Required! | Cloudflare", true},
 		{"incapsula", 200, "Request unsuccessful. Incapsula incident ID: 123-456", true},
 		{"f5 asm", 200, "The requested URL was rejected. Please consult with your administrator.", true},
-		{"modsecurity 406", 406, "anything", true},
+		// A bare 406 with no vendor body signature is NOT auto-blocked: it is a
+		// normal, spec-compliant "Not Acceptable" content-negotiation status
+		// plenty of ordinary REST APIs return for reasons that have nothing to
+		// do with a WAF. A genuine ModSecurity 406 is still caught below via
+		// its actual body text.
+		{"406 with no WAF signature (ordinary API content-negotiation)", 406, "anything", false},
+		{"modsecurity 406 with real signature", 406, "<h1>mod_security action</h1>", true},
 		{"rate limited 429", 429, "", true},
 		{"sucuri", 403, "Sucuri Website Firewall - Access Denied", true},
 		{"plain 403 app page", 403, "You must be logged in to view this page.", false},
+		// The exact regression this fix targets: an application's OWN
+		// authorization-failure page saying "Access Denied" (an extremely
+		// common phrasing with nothing to do with any WAF) must not be
+		// misclassified as a security-intermediary block.
+		{"app's own access-denied page (not a WAF)", 403, "Access Denied: you do not have permission to view this invoice.", false},
 		{"normal json", 200, `{"id":1,"name":"widget"}`, false},
 		{"empty", 200, "", false},
 	}

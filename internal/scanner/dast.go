@@ -588,7 +588,12 @@ func browserRendersResponse(status int, contentType, body string, nosniff bool) 
 // ModSecurity/Sucuri/Incapsula banner, a bot-challenge script) is what actually
 // distinguishes a WAF/edge block from the application's own response.
 func looksLikeBlockPage(status int, body string) bool {
-	if status == 429 || status == 406 {
+	// 406 is deliberately NOT auto-blocked here — see looksLikeWAFBlock
+	// (waf.go): it is a normal, spec-compliant "Not Acceptable" status plenty
+	// of ordinary REST APIs return for reasons that have nothing to do with a
+	// WAF. A genuine F5 ASM 406 block is still caught below via its
+	// distinctive body text, in wafBlockBodySignatures.
+	if status == 429 {
 		return true
 	}
 	if body == "" {
