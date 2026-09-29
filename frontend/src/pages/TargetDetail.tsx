@@ -272,15 +272,19 @@ function ScreenshotThumb({ screenshotId }: { screenshotId?: string }) {
 
 // groupVulnFindings collapses findings that are the SAME underlying issue
 // repeated across many URLs — the dominant clutter pattern for a systemic bug
-// (Host Header Injection, a missing security header, a CORS misconfiguration)
-// that a differential engine correctly re-confirms on every endpoint of a
-// host, since the root cause (how the app/proxy handles that input) is
-// host-wide, not per-URL. Grouping by (type, host, parameter) collapses those
-// into one row while leaving genuinely distinct bugs — a different vuln type,
-// a different host, or the same type on a different parameter — as separate
-// rows, mirroring how nuclei's template-id grouping already works elsewhere
-// on this page. All members stay reachable via the row's expandable list, so
-// no finding is hidden — only de-duplicated visually.
+// (Host Header Injection) that a differential engine correctly re-confirms on
+// every endpoint of a host, since the root cause (how the app/proxy handles
+// that input) is host-wide, not per-URL. Only HOST_WIDE_VULN_TYPES collapse
+// across different URLs on the same host+parameter — everything else (SQLi,
+// XSS, SSRF, IDOR, ...) requires the exact same URL to group, since those
+// classes are frequently endpoint-specific: two different SQLi bugs on
+// /api/users?id= and /api/products?id= share a type and parameter name but
+// are NOT the same root cause, and must never read as "same issue, ignore
+// the second one" duplicates. All members stay reachable via the row's
+// expandable list either way, so no finding is hidden — only de-duplicated
+// visually, mirroring how nuclei's template-id grouping already works
+// elsewhere on this page.
+const HOST_WIDE_VULN_TYPES = new Set(['host_header_injection'])
 interface VulnGroup {
   key: string
   type: string
@@ -296,7 +300,8 @@ function groupVulnFindings(rows: VulnFinding[]): VulnGroup[] {
   const order: string[] = []
   const groups = new Map<string, VulnGroup>()
   for (const v of rows) {
-    const key = `${v.type}\u0000${hostOfURL(v.url)}\u0000${v.parameter || ''}`
+    const scope = HOST_WIDE_VULN_TYPES.has(v.type) ? hostOfURL(v.url) : v.url
+    const key = `${v.type}\u0000${scope}\u0000${v.parameter || ''}`
     let g = groups.get(key)
     if (!g) {
       g = { key, type: v.type, host: hostOfURL(v.url), parameter: v.parameter, representative: v, members: [] }

@@ -103,6 +103,13 @@ and fast request profiles. Network scans appear only for compatible assets and
 offer Fast, Normal, and Deep profiles. Web and network phases cannot be mixed
 accidentally in one task.
 
+Whole-target scans default to prioritized, asset-first execution: every
+request-heavy module runs its full pipeline against the highest-priority
+asset (main domain, admin/API/staging-shaped hosts, high tech-signal
+hosts) before moving to the next, with a lighter module tier for
+low-score or duplicate/wildcard-catch-all tail assets. The classic
+module-by-module sweep remains available as an explicit opt-out.
+
 ### 3. Watch coverage—not just progress
 
 Every phase records discovered, eligible, attempted, candidate, confirmed,
@@ -113,9 +120,14 @@ capability, identities, callbacks, or eligible inputs do not become a false
 ### 4. Triage evidence
 
 Findings carry detector-specific evidence while uncertain signals remain
-candidates. Admin and high-sensitive panels are content-grouped, redirect-aware,
-and deduplicated across hosts. The orange target count is reserved for
-actionable medium-or-higher findings instead of low-value inventory noise.
+candidates. A systemic issue confirmed across many URLs of the same host
+(a missing header, a host-wide misconfiguration) collapses into one
+finding with its affected URLs listed underneath, instead of one row per
+URL. Admin and high-sensitive panels are content-grouped, redirect-aware,
+and deduplicated across hosts. Confirmed admin panels and confirmed XSS
+with live browser execution proof carry a captured screenshot alongside
+their evidence. The orange target count is reserved for actionable
+medium-or-higher findings instead of low-value inventory noise.
 
 ### 5. Keep the operation moving
 
@@ -244,19 +256,28 @@ Commands include `/status`, `/targets`, `/target`, `/scans`, `/findings`,
 `/scan`, `/pause`, `/resume`, `/skip`, `/cancel`, `/addtarget`, `/edittarget`,
 and `/deletetarget`.
 
-## v3.4 highlights
+## v4.0.0 highlights
 
-- explicit Fast, Normal, and Deep network pipelines for IP/CIDR/range assets;
-- proof-gated file-upload validation across multipart and structured API shapes;
-- browser-state coverage for frames, shadow roots, forms, tabs, hashes, and
-  disclosure controls;
-- deeper HTML/SVG/attribute/JavaScript/URL/`srcdoc` XSS context handling;
-- verified and content-grouped admin/high-sensitive panel inventory;
-- per-phase measurable coverage counters and richer portable exports;
-- stricter Nuclei signal filtering and format-specific exposure templates.
+- prioritized, asset-first scanning is now the default execution order for
+  whole-target scans, with live per-asset progress and a tiered depth for
+  low-score/duplicate tail assets;
+- root-caused (not just tuned) SQLi slowness on WAF/rate-limited targets and
+  an XSS coverage-loss bug, plus a new WAF-bypass encoding layer for XSS;
+- fixed a shared false-negative in the WAF/block-page gate nearly every
+  differential detector relies on (SQLi, XSS, SSRF, LFI, XXE, SSTI, CSTI,
+  IDOR, NoSQLi, cache poisoning);
+- two concrete subdomain-takeover false-positive fixes: wildcard/catch-all
+  DNS detection and generic-signature confidence gating;
+- a branded, site-aware backup/secret-file wordlist plus CMS
+  automated-backup-plugin paths;
+- findings collapse by root cause (type + host + parameter) instead of one
+  row per affected URL, with screenshot capture for confirmed admin panels
+  and confirmed XSS execution proof;
+- Nuclei low/info-severity templates removed outright — no configurable
+  opt-in remains.
 
 The full technical change record is in the
-[v3.4.0 release notes](docs/V3_4_0_RELEASE_NOTES.md).
+[v4.0.0 release notes](docs/V4_0_0_RELEASE_NOTES.md).
 
 ## Toolchain
 
@@ -306,7 +327,7 @@ project hosts.
 | [Scanning guide](docs/SCANNING_GUIDE.md) | Scope types, web/network plans, proof states, controls, corpora, and exports |
 | [Capability matrix](docs/V3_CAPABILITY_MATRIX.md) | Module prerequisites, positive-proof contracts, and supported boundaries |
 | [Docker reference](README.Docker.md) | Image contents, Compose layout, capabilities, and persistence |
-| [v3.4.0 release notes](docs/V3_4_0_RELEASE_NOTES.md) | Current release details and local regression commands |
+| [v4.0.0 release notes](docs/V4_0_0_RELEASE_NOTES.md) | Current release details and local regression commands |
 | [Contributing](CONTRIBUTING.md) | Development workflow and contribution expectations |
 | [Security policy](SECURITY.md) | Private vulnerability reporting for Reconner itself |
 

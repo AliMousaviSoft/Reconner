@@ -69,6 +69,34 @@ const lightTierScoreThreshold = 15
 // redundancy, not a size-based tradeoff).
 const lightTierMinAssetCount = 10
 
+// injectionParallelGroup mirrors the pre-prioritized scheduler's parallel-group
+// assignment (see the historical comment this replaced in scheduler.go): a
+// module's group id lets it run CONCURRENTLY with its same-group siblings
+// (when Limits.ParallelModules is on) — group 1 is JS/param discovery
+// (target-wide, outside runPerAssetPhase entirely), group 3 is directory +
+// backup discovery, and group 2 is the lighter active-injection checks.
+// XSS/SQLi deliberately have no group id and always run alone: running their
+// own independent worker pools concurrently against the same host self-
+// contends and trips the adaptive WAF backoff. runPerAssetPhase below reuses
+// this exact map so per-asset scanning doesn't silently regress from the
+// concurrency the classic (non-prioritized) scheduler path still has.
+var injectionParallelGroup = map[string]int{
+	ModuleJSAnalysis:      1,
+	ModuleParamDiscovery:  1,
+	ModuleDirDiscovery:    3,
+	ModuleBackupDiscovery: 3,
+	ModuleNoSQLi:          2,
+	ModuleSSRF:            2,
+	ModuleLFI:             2,
+	ModuleSSTI:            2,
+	ModuleCmdi:            2,
+	ModuleXXE:             2,
+	ModuleFileUpload:      2,
+	ModuleCachePoison:     2,
+	ModuleRace:            2,
+	ModuleIDOR:            2,
+}
+
 func isPerAssetModule(module string) bool { return perAssetModuleSet[module] }
 
 // collectPerAssetModules gathers every not-yet-handled per-asset module from
@@ -179,14 +207,54 @@ func (s *Scheduler) runPerAssetPhase(ctx context.Context, taskID, targetID strin
 		}
 		s.updateAssetProgress(taskID, aw.host, i+1, total)
 		assetCtx := scanner.WithHostScope(ctx, []string{aw.host})
-		for _, m := range aw.modules {
+
+		// Batch same-parallel-group modules (see injectionParallelGroup) to run
+		// concurrently against this one asset, same as the classic scheduler path
+		// does target-wide — otherwise prioritized scanning silently loses that
+		// concurrency for SSRF/LFI/SSTI/CSTI/Cmdi/XXE/FileUpload/CachePoison/Race/
+		// IDOR/NoSQLi and directory+backup discovery.
+		j := 0
+		for j < len(aw.modules) {
 			if ctx.Err() != nil {
 				break
+			}
+			m := aw.modules[j]
+			gid := injectionParallelGroup[m]
+			if gid > 0 && s.cfg.Limits.ParallelModules {
+				batch := []string{m}
+				k := j + 1
+				for k < len(aw.modules) && injectionParallelGroup[aw.modules[k]] == gid {
+					batch = append(batch, aw.modules[k])
+					k++
+				}
+				if len(batch) > 1 {
+					logFn("info", "scheduler", fmt.Sprintf("[asset %d/%d score=%d] Running %d module(s) in parallel: %v", i+1, total, aw.score, len(batch), batch))
+					resultCh := make(chan phaseRunResult, len(batch))
+					for _, bm := range batch {
+						go func(mm string) {
+							bStarted := time.Now()
+							err := runPlannedModule(assetCtx, mm)
+							resultCh <- phaseRunResult{module: mm, err: err, duration: time.Since(bStarted)}
+						}(bm)
+					}
+					batchResults, forced := collectPhaseResults(assetCtx, batch, resultCh, phaseStopGrace)
+					if forced {
+						logFn("warn", "scheduler", fmt.Sprintf("[asset %d/%d] Module batch %v did not stop within %s after cancellation; force-released.", i+1, total, batch, phaseStopGrace))
+					}
+					for _, r := range batchResults {
+						if r.err != nil && results[r.module].err == nil {
+							results[r.module].err = r.err
+						}
+					}
+					j = k
+					continue
+				}
 			}
 			logFn("info", m, fmt.Sprintf("[asset %d/%d score=%d] %s", i+1, total, aw.score, aw.host))
 			if err := runPlannedModule(assetCtx, m); err != nil && results[m].err == nil {
 				results[m].err = err
 			}
+			j++
 		}
 	}
 	for _, m := range group {

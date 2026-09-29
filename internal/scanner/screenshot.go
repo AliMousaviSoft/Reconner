@@ -14,6 +14,15 @@ import (
 	"github.com/recon-platform/internal/database"
 )
 
+// screenshotSem bounds how many headless Chromium instances captureScreenshot
+// may run at once. Every caller (confirmed admin panels, confirmed XSS) fires
+// capture as a best-effort background goroutine with no coordination between
+// them, so on a target with many confirmations in flight at once — a scan of
+// a large program that turns up dozens of admin panels across many hosts —
+// nothing previously bounded how many simultaneous Chromium subprocesses
+// could stack up, unlike every other browser-driven path in this codebase.
+var screenshotSem = make(chan struct{}, 3)
+
 // captureScreenshot renders rawURL in a short-lived headless Chromium and
 // persists a PNG, inserting a row into the (pre-existing but previously never
 // populated) screenshots table. Returns the screenshot's ID for embedding in
@@ -38,6 +47,14 @@ func captureScreenshot(ctx context.Context, db *database.DB, cfg *config.Config,
 	if chromePath == "" {
 		return ""
 	}
+
+	select {
+	case screenshotSem <- struct{}{}:
+		defer func() { <-screenshotSem }()
+	case <-ctx.Done():
+		return ""
+	}
+
 	capCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 

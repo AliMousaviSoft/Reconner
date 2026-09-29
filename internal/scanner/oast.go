@@ -245,6 +245,9 @@ func (s *OASTScanner) aliveRoots(ctx context.Context, targetID string) []string 
 		if rows.Scan(&u) != nil {
 			continue
 		}
+		if !urlHostInScope(ctx, u) {
+			continue
+		}
 		if b := hostBaseScan(u); b != "" && !seen[b] {
 			seen[b] = true
 			out = append(out, b)

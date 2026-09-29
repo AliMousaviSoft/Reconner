@@ -1701,41 +1701,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	}
 
 	// Modules grouped by a parallel-GROUP id run concurrently within their group
-	// (when Limits.ParallelModules is on). Groups respect data dependencies:
-	//
-	//   group 1 — JS and parameter discovery build the reusable target vocabulary
-	//   group 3 — directory + backup discovery consume that vocabulary together
-	//   group 2 — lighter active checks; all read the `parameters` table, which
-	//             group-1's param_discovery + the sequential param_reflection
-	//             have already populated by the time group 2 starts.
-	//
-	// The three request-heavy engines (native XSS/browser, legacy vuln/Dalfox and
-	// SQLi) deliberately remain sequential per target. Running them together made
-	// their independent worker pools hammer the same host, trigger the adaptive WAF
-	// backoff, serialize thousands of Chromium navigations, and ultimately run
-	// slower with more transport misses. Different targets still progress in
-	// parallel through the scheduler; this only removes self-contention on one app.
-	//
-	// Modules NOT in the map run sequentially in their listed position, so the
-	// ordering barriers (param_discovery → param_reflection → injection → verify)
-	// are preserved. Target-request pressure stays bounded by the shared
-	// transport's MaxConnsPerHost cap even with many injection modules at once.
-	parallelGroup := map[string]int{
-		ModuleJSAnalysis:      1,
-		ModuleParamDiscovery:  1,
-		ModuleDirDiscovery:    3,
-		ModuleBackupDiscovery: 3,
-		ModuleNoSQLi:          2,
-		ModuleSSRF:            2,
-		ModuleLFI:             2,
-		ModuleSSTI:            2,
-		ModuleCmdi:            2,
-		ModuleXXE:             2,
-		ModuleFileUpload:      2,
-		ModuleCachePoison:     2,
-		ModuleRace:            2,
-		ModuleIDOR:            2,
-	}
+	// (when Limits.ParallelModules is on). See injectionParallelGroup's own doc
+	// comment for the group semantics and dependency ordering; runPerAssetPhase
+	// (priority_scan.go) reuses this same map so prioritized scanning doesn't
+	// silently lose this concurrency for its per-asset module group.
+	parallelGroup := injectionParallelGroup
 
 	// completedModules tracks which modules finished WITHOUT error, persisted to
 	// the task row as we go — this is what lets a failed/cancelled task (e.g. a

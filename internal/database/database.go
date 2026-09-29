@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -36,8 +37,15 @@ func (db *DB) Close() error {
 	return db.DB.Close()
 }
 
+// screenshotSeq disambiguates two captures for the same host landing in the
+// same nanosecond-resolution instant — plausible in practice, since captures
+// now run concurrently (see internal/scanner/screenshot.go's capture
+// semaphore) and a coarse system clock can still tie.
+var screenshotSeq atomic.Uint64
+
 func ScreenshotPath(screenshotsDir, host string) string {
-	return filepath.Join(screenshotsDir, fmt.Sprintf("%s_%d.png", sanitizeFilename(host), time.Now().Unix()))
+	seq := screenshotSeq.Add(1)
+	return filepath.Join(screenshotsDir, fmt.Sprintf("%s_%d_%d.png", sanitizeFilename(host), time.Now().UnixNano(), seq))
 }
 
 func sanitizeFilename(s string) string {
