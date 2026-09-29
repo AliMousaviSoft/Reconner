@@ -112,7 +112,7 @@ func (s *NoSQLiScanner) testPoint(ctx context.Context, targetID string, ip inser
 		if !strings.Contains(strings.ToLower(replay), sig) || bodyLooksLikeWAFBlock(errBody) || bodyLooksLikeWAFBlock(replay) {
 			return false
 		}
-		s.store(targetID, "critical", ip, fmt.Sprintf("NoSQL error triggered by injected metacharacter — response leaked %q (not in baseline)", sig), 95)
+		s.store(targetID, "critical", ip, ip.Param+"="+valueErr, fmt.Sprintf("NoSQL error triggered by injected metacharacter — response leaked %q (not in baseline)", sig), 95)
 		s.report(targetID, ip, logFn, "error", 95)
 		return true
 	}
@@ -133,13 +133,13 @@ func (s *NoSQLiScanner) testPoint(ctx context.Context, targetID string, ip inser
 	//      A regex-matched login/search filter can be bypassed with $regex even
 	//      where $ne semantics leave the output unchanged, so it's real added reach.
 	if tl, fl, ok := s.booleanOpDiff(ctx, ip, auth, isJSON, vol, "rcnnope", "$ne", "rcnnope", "$eq"); ok {
-		s.store(targetID, "high", ip,
+		s.store(targetID, "high", ip, ip.Param+"[$ne]=rcnnope",
 			fmt.Sprintf("NoSQL boolean injection: [$ne] response (%dB) differs materially from [$eq] (%dB), reproduced with a stable direction across two request pairs — the operator was interpreted by the database.", tl, fl), 80)
 		s.report(targetID, ip, logFn, "boolean", 80)
 		return true
 	}
 	if tl, fl, ok := s.booleanOpDiff(ctx, ip, auth, isJSON, vol, ".*", "$regex", "^rcnZZnomatch$", "$regex"); ok {
-		s.store(targetID, "high", ip,
+		s.store(targetID, "high", ip, ip.Param+`[$regex]=.*`,
 			fmt.Sprintf("NoSQL boolean injection ($regex): a match-all [$regex '.*'] response (%dB) differs materially from a match-none [$regex '^…$'] (%dB), reproduced with a stable direction — the regex operator was interpreted by the database (Rocket.Chat CVE-2021-22911 class).", tl, fl), 80)
 		s.report(targetID, ip, logFn, "boolean-regex", 80)
 		return true
@@ -165,7 +165,7 @@ func (s *NoSQLiScanner) customErrorProbe(ctx context.Context, targetID string, i
 		if !strings.Contains(strings.ToLower(replay), sig) || bodyLooksLikeWAFBlock(replay) {
 			continue
 		}
-		s.store(targetID, "critical", ip, fmt.Sprintf("NoSQL driver error triggered by operator corpus payload %q; response leaked %q twice and the signature was absent from baseline", payload, sig), 95)
+		s.store(targetID, "critical", ip, ip.Param+"="+payload, fmt.Sprintf("NoSQL driver error triggered by operator corpus payload %q; response leaked %q twice and the signature was absent from baseline", payload, sig), 95)
 		s.report(targetID, ip, logFn, "custom-error", 95)
 		return true
 	}
@@ -331,7 +331,7 @@ func setRawQueryParam(rawURL, key, value string) string {
 	return base + "?" + strings.Join(pairs, "&")
 }
 
-func (s *NoSQLiScanner) store(targetID, sev string, ip insertionPoint, evidence string, confidence int) {
+func (s *NoSQLiScanner) store(targetID, sev string, ip insertionPoint, payload, evidence string, confidence int) {
 	priority := confidence * severityWeightIDOR(sev)
 	verdict := CandDetected
 	if confidence >= ConfEvidence {
@@ -339,7 +339,7 @@ func (s *NoSQLiScanner) store(targetID, sev string, ip insertionPoint, evidence 
 	}
 	_, _ = RecordDetectorObservation(context.Background(), s.db, DetectorObservation{
 		TargetID: targetID, Type: "nosql_injection", Severity: sev, URL: ip.URL,
-		Method: ip.Method, Parameter: ip.Param, Location: locOf(ip), Payload: ip.Param + "[$ne]",
+		Method: ip.Method, Parameter: ip.Param, Location: locOf(ip), Payload: payload,
 		Evidence: evidence, Source: "nosqli-native", DetectionMethod: "operator-differential",
 		Confidence: confidence, Priority: priority, Verdict: verdict,
 	})
