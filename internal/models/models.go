@@ -153,6 +153,7 @@ type AdminPanelFinding struct {
 	Evidence      string    `json:"evidence"`
 	AffectedCount int       `json:"affected_count"`
 	AffectedURLs  []string  `json:"affected_urls"`
+	ScreenshotID  string    `json:"screenshot_id,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 

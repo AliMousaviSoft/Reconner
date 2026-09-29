@@ -780,9 +780,53 @@ func (s *DASTScanner) confirmXSS(ctx context.Context, targetID string, ip insert
 		DetectionMethod: "context:" + ctxName + "/" + proof, Severity: "high",
 		Confidence: confidence, Evidence: ev,
 	}
-	_, _ = RecordCandidateResult(ctx, s.db, c, VerifyResult{
+	candidateID, _ := RecordCandidateResult(ctx, s.db, c, VerifyResult{
 		Verdict: VerifyVerified, Confidence: confidence, Evidence: ev, Method: "dast-" + proof,
 	}, FindingMeta{Actor: "dast"})
+	if candidateID != "" {
+		s.captureXSSScreenshot(targetID, candidateID, xssReproURL(ip, execPayload))
+	}
+}
+
+// xssReproURL builds the URL a screenshot should navigate to so the captured
+// picture actually shows the payload firing, not just the plain page. Only
+// the common, unambiguous case (a query-string GET parameter) is worth
+// reconstructing here — body/JSON/path-based reflections would need the
+// original request's full method/body replayed, which a single GET
+// navigation can't reproduce anyway, so those fall back to the bare page URL
+// (still useful triage context even without the payload visibly firing).
+func xssReproURL(ip insertionPoint, payload string) string {
+	loc := insertionLocation(ip)
+	if (loc == "query" || loc == "") && strings.ToUpper(ip.Method) == "GET" {
+		return injectParam(ip.URL, ip.Param, payload)
+	}
+	return ip.URL
+}
+
+// captureXSSScreenshot takes a visual proof shot of a CONFIRMED (browser-
+// executed) XSS — this is the "verified PoC" case: a real headless browser
+// already ran the payload to reach this point, so a picture of the result
+// (the alert dialog, the DOM change) is the single fastest way for a triager
+// to assess it, far faster than reading raw evidence text. Fire-and-forget:
+// a failed capture must never affect the already-recorded finding.
+//
+// RecordCandidateResult returns the CANDIDATE's id, not the vuln_findings
+// row's id (upsertFindingProjection mints its own, separate UUID for that
+// table) — the candidates row's finding_id column is the link between them,
+// populated by the time that call returns, so it's resolved here rather than
+// writing screenshot_id onto the wrong table's primary key.
+func (s *DASTScanner) captureXSSScreenshot(targetID, candidateID, rawURL string) {
+	go func() {
+		var findingID string
+		if err := s.db.QueryRow(`SELECT COALESCE(finding_id,'') FROM candidates WHERE id=?`, candidateID).Scan(&findingID); err != nil || findingID == "" {
+			return
+		}
+		shotID := captureScreenshot(context.Background(), s.db, s.cfg, targetID, rawURL)
+		if shotID == "" {
+			return
+		}
+		_, _ = s.db.Exec(`UPDATE vuln_findings SET screenshot_id=? WHERE id=?`, shotID, findingID)
+	}()
 }
 
 // sqlErrorAppeared reports whether a SQL error signature is present in the

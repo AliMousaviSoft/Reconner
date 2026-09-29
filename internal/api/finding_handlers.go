@@ -344,7 +344,7 @@ func (h *Handler) handleListAdminPanels(w http.ResponseWriter, r *http.Request) 
 	id := mux.Vars(r)["id"]
 	rows, err := h.db.QueryContext(r.Context(), `
 		SELECT id,target_id,url,status_code,panel_type,product,title,redirect_url,
-			content_hash,group_key,evidence,created_at
+			content_hash,group_key,evidence,created_at,COALESCE(screenshot_id,'')
 		FROM admin_panel_findings WHERE target_id=? AND status_code NOT BETWEEN 300 AND 399
 		ORDER BY group_key,url`, id)
 	if err != nil {
@@ -358,7 +358,7 @@ func (h *Handler) handleListAdminPanels(w http.ResponseWriter, r *http.Request) 
 		var f models.AdminPanelFinding
 		if err := rows.Scan(&f.ID, &f.TargetID, &f.URL, &f.StatusCode, &f.PanelType,
 			&f.Product, &f.Title, &f.RedirectURL, &f.ContentHash, &f.GroupKey,
-			&f.Evidence, &f.CreatedAt); err != nil {
+			&f.Evidence, &f.CreatedAt, &f.ScreenshotID); err != nil {
 			continue
 		}
 		g := groups[f.GroupKey]
@@ -370,9 +370,18 @@ func (h *Handler) handleListAdminPanels(w http.ResponseWriter, r *http.Request) 
 		}
 		g.AffectedURLs = append(g.AffectedURLs, f.URL)
 		g.AffectedCount++
-		// Prefer the shortest URL as the compact representative.
+		// Prefer the shortest URL as the compact representative — but never
+		// lose an already-captured screenshot just because a shorter URL
+		// happened to be seen later without one of its own yet.
 		if len(f.URL) < len(g.URL) {
+			shot := g.ScreenshotID
 			g.URL, g.ID, g.StatusCode, g.RedirectURL, g.CreatedAt = f.URL, f.ID, f.StatusCode, f.RedirectURL, f.CreatedAt
+			g.ScreenshotID = f.ScreenshotID
+			if g.ScreenshotID == "" {
+				g.ScreenshotID = shot
+			}
+		} else if g.ScreenshotID == "" {
+			g.ScreenshotID = f.ScreenshotID
 		}
 	}
 	findings := make([]models.AdminPanelFinding, 0, len(groups))
@@ -605,7 +614,8 @@ func (h *Handler) handleListVulnFindings(w http.ResponseWriter, r *http.Request)
 			COALESCE(confidence,0), COALESCE(priority,0), COALESCE(status,'finding'),
 			SUBSTR(COALESCE(provenance,''),1,4000),
 			COALESCE(lifecycle,'LEGACY'), COALESCE(candidate_id,''),
-			COALESCE(triage,''), SUBSTR(COALESCE(triage_note,''),1,1000), created_at
+			COALESCE(triage,''), SUBSTR(COALESCE(triage_note,''),1,1000), created_at,
+			COALESCE(screenshot_id,'')
 		FROM vuln_findings WHERE target_id = ?`
 	args := []any{id}
 
@@ -639,28 +649,29 @@ func (h *Handler) handleListVulnFindings(w http.ResponseWriter, r *http.Request)
 	defer rows.Close()
 
 	type VulnFinding struct {
-		ID          string `json:"id"`
-		TargetID    string `json:"target_id"`
-		Type        string `json:"type"`
-		Severity    string `json:"severity"`
-		URL         string `json:"url"`
-		Parameter   string `json:"parameter"`
-		Payload     string `json:"payload"`
-		Evidence    string `json:"evidence"`
-		Confidence  int    `json:"confidence"`
-		Priority    int    `json:"priority"`
-		Status      string `json:"status"`
-		Provenance  string `json:"provenance"`
-		Lifecycle   string `json:"lifecycle"`
-		CandidateID string `json:"candidate_id"`
-		Triage      string `json:"triage"`
-		TriageNote  string `json:"triage_note"`
-		CreatedAt   string `json:"created_at"`
+		ID           string `json:"id"`
+		TargetID     string `json:"target_id"`
+		Type         string `json:"type"`
+		Severity     string `json:"severity"`
+		URL          string `json:"url"`
+		Parameter    string `json:"parameter"`
+		Payload      string `json:"payload"`
+		Evidence     string `json:"evidence"`
+		Confidence   int    `json:"confidence"`
+		Priority     int    `json:"priority"`
+		Status       string `json:"status"`
+		Provenance   string `json:"provenance"`
+		Lifecycle    string `json:"lifecycle"`
+		CandidateID  string `json:"candidate_id"`
+		Triage       string `json:"triage"`
+		TriageNote   string `json:"triage_note"`
+		CreatedAt    string `json:"created_at"`
+		ScreenshotID string `json:"screenshot_id,omitempty"`
 	}
 	findings := make([]VulnFinding, 0)
 	for rows.Next() {
 		var f VulnFinding
-		if err := rows.Scan(&f.ID, &f.TargetID, &f.Type, &f.Severity, &f.URL, &f.Parameter, &f.Payload, &f.Evidence, &f.Confidence, &f.Priority, &f.Status, &f.Provenance, &f.Lifecycle, &f.CandidateID, &f.Triage, &f.TriageNote, &f.CreatedAt); err == nil {
+		if err := rows.Scan(&f.ID, &f.TargetID, &f.Type, &f.Severity, &f.URL, &f.Parameter, &f.Payload, &f.Evidence, &f.Confidence, &f.Priority, &f.Status, &f.Provenance, &f.Lifecycle, &f.CandidateID, &f.Triage, &f.TriageNote, &f.CreatedAt, &f.ScreenshotID); err == nil {
 			findings = append(findings, f)
 		}
 	}

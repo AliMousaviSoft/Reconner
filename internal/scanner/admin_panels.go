@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/url"
@@ -159,6 +160,7 @@ func (s *DirScanner) storeAdminPanel(targetID, rawURL string, status int, title 
 	if !ok {
 		return false
 	}
+	panelID := uuid.New().String()
 	hash := panelContentHash(body)
 	group := adminPanelGroupKey(sig, rawURL, redirectURL, hash, title)
 	_, err := s.db.Exec(`
@@ -169,9 +171,35 @@ func (s *DirScanner) storeAdminPanel(targetID, rawURL string, status int, title 
 			panel_type=excluded.panel_type,product=excluded.product,title=excluded.title,
 			redirect_url=excluded.redirect_url,content_hash=excluded.content_hash,
 			group_key=excluded.group_key,evidence=excluded.evidence,updated_at=CURRENT_TIMESTAMP`,
-		uuid.New().String(), targetID, rawURL, status, sig.PanelType, sig.Product, title,
+		panelID, targetID, rawURL, status, sig.PanelType, sig.Product, title,
 		redirectURL, hash, group, sig.Evidence)
-	return err == nil
+	if err != nil {
+		return false
+	}
+	s.captureAdminPanelScreenshot(targetID, rawURL)
+	return true
+}
+
+// captureAdminPanelScreenshot takes a visual proof shot of a newly confirmed
+// admin panel — a triager assessing "is this really an exposed Grafana/
+// phpMyAdmin/Kubernetes Dashboard" moves far faster from a thumbnail than
+// from raw evidence text alone. Skipped when this exact URL already has one
+// (a re-scan re-confirming the same panel shouldn't relaunch a browser every
+// time), and always fire-and-forget: capture failure must never affect
+// whether the panel itself gets recorded (already done by the time this runs).
+func (s *DirScanner) captureAdminPanelScreenshot(targetID, rawURL string) {
+	var existing string
+	_ = s.db.QueryRow(`SELECT COALESCE(screenshot_id,'') FROM admin_panel_findings WHERE target_id=? AND url=?`, targetID, rawURL).Scan(&existing)
+	if existing != "" {
+		return
+	}
+	go func() {
+		id := captureScreenshot(context.Background(), s.db, s.cfg, targetID, rawURL)
+		if id == "" {
+			return
+		}
+		_, _ = s.db.Exec(`UPDATE admin_panel_findings SET screenshot_id=? WHERE target_id=? AND url=?`, id, targetID, rawURL)
+	}()
 }
 
 // classifyStoredServicePanels catches panels mounted at / on dedicated hosts

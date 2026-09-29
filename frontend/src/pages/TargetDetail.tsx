@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { targets as targetsApi, findings as findingsApi, tasks as tasksApi, bounty as bountyApi } from '../lib/api'
 import { useUIStore } from '../store/ui'
@@ -249,6 +249,118 @@ function PanelAffected({ panel }: { panel: AdminPanelFinding }) {
               <CopyButton text={u} />
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ScreenshotThumb renders a small clickable preview for a captured browser
+// screenshot (admin panel, or a confirmed high-value finding like XSS with
+// real execution proof). Renders nothing when no screenshot was captured —
+// most findings never trigger a capture, so an empty state would be noise
+// repeated on every row.
+function ScreenshotThumb({ screenshotId }: { screenshotId?: string }) {
+  if (!screenshotId) return null
+  const src = `/screenshots/${screenshotId}`
+  return (
+    <a href={src} target="_blank" rel="noreferrer" className="block mt-1.5 w-28 border border-border rounded overflow-hidden bg-black hover:opacity-90 transition-opacity">
+      <img src={src} alt="screenshot" loading="lazy" className="w-full h-20 object-cover object-top" />
+    </a>
+  )
+}
+
+// groupVulnFindings collapses findings that are the SAME underlying issue
+// repeated across many URLs — the dominant clutter pattern for a systemic bug
+// (Host Header Injection, a missing security header, a CORS misconfiguration)
+// that a differential engine correctly re-confirms on every endpoint of a
+// host, since the root cause (how the app/proxy handles that input) is
+// host-wide, not per-URL. Grouping by (type, host, parameter) collapses those
+// into one row while leaving genuinely distinct bugs — a different vuln type,
+// a different host, or the same type on a different parameter — as separate
+// rows, mirroring how nuclei's template-id grouping already works elsewhere
+// on this page. All members stay reachable via the row's expandable list, so
+// no finding is hidden — only de-duplicated visually.
+interface VulnGroup {
+  key: string
+  type: string
+  host: string
+  parameter: string
+  representative: VulnFinding
+  members: VulnFinding[]
+}
+function hostOfURL(raw: string): string {
+  try { return new URL(raw).host || raw } catch { return raw }
+}
+function groupVulnFindings(rows: VulnFinding[]): VulnGroup[] {
+  const order: string[] = []
+  const groups = new Map<string, VulnGroup>()
+  for (const v of rows) {
+    const key = `${v.type}\u0000${hostOfURL(v.url)}\u0000${v.parameter || ''}`
+    let g = groups.get(key)
+    if (!g) {
+      g = { key, type: v.type, host: hostOfURL(v.url), parameter: v.parameter, representative: v, members: [] }
+      groups.set(key, g)
+      order.push(key)
+    }
+    g.members.push(v)
+    // Prefer a finding-status/higher-confidence member as the representative
+    // shown by default, so a confirmed instance isn't hidden behind a weaker one.
+    const better = (a: VulnFinding, b: VulnFinding) =>
+      (a.status === 'finding' ? 1 : 0) !== (b.status === 'finding' ? 1 : 0)
+        ? (a.status === 'finding' ? a : b)
+        : (a.confidence ?? 0) >= (b.confidence ?? 0) ? a : b
+    g.representative = better(g.representative, v)
+  }
+  return order.map(k => groups.get(k)!)
+}
+
+// VulnGroupMember renders one collapsed group's full member list, each with its
+// own link, evidence/PoC and independent triage controls — nothing about an
+// individual finding is lost by the grouping, it's just not shown by default.
+function VulnGroupMember({ targetId, v, onDone }: { targetId: string; v: VulnFinding; onDone: () => void }) {
+  const pocUrl = buildPocUrl(v.type, v.url, v.parameter, v.payload)
+  const reproUrl = pocUrl || v.url
+  return (
+    <div className="border-l border-white/10 pl-2 py-1">
+      <div className="flex items-start gap-1">
+        <a href={v.url} target="_blank" rel="noreferrer" className="flex-1 font-mono text-[10px] text-accent break-all hover:underline">{v.url}</a>
+        <CopyButton text={v.url} />
+      </div>
+      {pocUrl && (
+        <div className="flex items-center gap-1 mt-0.5">
+          <a href={pocUrl} target="_blank" rel="noreferrer" className="text-severity-high hover:underline text-[10px] font-mono font-semibold">Open PoC ↗</a>
+          <CopyButton text={pocUrl} />
+        </div>
+      )}
+      {v.evidence && (
+        <p className="text-[10px] text-text-muted mt-0.5" title={v.evidence}>{truncate(v.evidence, 100)}</p>
+      )}
+      <ScreenshotThumb screenshotId={v.screenshot_id} />
+      <details className="mt-0.5">
+        <summary className="cursor-pointer text-[10px] text-text-muted hover:text-text-secondary select-none">curl</summary>
+        <div className="flex items-start gap-1 mt-0.5">
+          <pre className="flex-1 font-mono text-[10px] text-text-secondary whitespace-pre-wrap break-all bg-bg-secondary/50 p-1 rounded">{pocCurl(reproUrl)}</pre>
+          <CopyButton text={pocCurl(reproUrl)} />
+        </div>
+      </details>
+      <TriageBar targetId={targetId} finding={v} onDone={onDone} />
+    </div>
+  )
+}
+
+function VulnGroupAffected({ targetId, group, onDone }: { targetId: string; group: VulnGroup; onDone: () => void }) {
+  const [open, setOpen] = useState(false)
+  const others = group.members.filter(m => m.id !== group.representative.id)
+  if (others.length === 0) return null
+  return (
+    <div className="mt-1">
+      <button onClick={() => setOpen(v => !v)} className="text-[10px] text-accent hover:underline select-none">
+        {open ? '▾' : '▸'} {others.length} more affected URL{others.length === 1 ? '' : 's'} — same root cause
+      </button>
+      {open && (
+        <div className="mt-1 space-y-1 max-h-80 overflow-auto pr-1">
+          {others.map(m => <VulnGroupMember key={m.id} targetId={targetId} v={m} onDone={onDone} />)}
         </div>
       )}
     </div>
@@ -581,6 +693,19 @@ export default function TargetDetail() {
   // Windowed view of the loaded rows — only the first `visibleCount` are mounted.
   const pageData = filteredData.slice(0, visibleCount)
   const hasMore = filteredData.length > visibleCount
+
+  // vulns/candidates: group same-root-cause findings (a host-wide issue like
+  // Host Header Injection re-confirmed on every URL) before windowing, so the
+  // "N loaded" footer and pagination both count DISTINCT issues, not raw rows.
+  const isVulnTab = tab === 'vulns' || tab === 'candidates'
+  const vulnGroups = useMemo(
+    () => (isVulnTab ? groupVulnFindings(filteredData as VulnFinding[]) : []),
+    [isVulnTab, filteredData]
+  )
+  const vulnGroupPage = vulnGroups.slice(0, visibleCount)
+  const footerShownCount = isVulnTab ? vulnGroupPage.length : pageData.length
+  const footerTotalCount = isVulnTab ? vulnGroups.length : filteredData.length
+  const footerHasMore = isVulnTab ? vulnGroups.length > visibleCount : hasMore
 
   return (
     <ErrorBoundary>
@@ -1040,6 +1165,7 @@ export default function TargetDetail() {
                               <a href={p.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono break-all">{truncate(p.url, 72)}</a>
                               <p className="text-xs font-semibold text-text-primary mt-0.5">{p.product || p.title || 'Sensitive panel'}</p>
                               <PanelAffected panel={p} />
+                              <ScreenshotThumb screenshotId={p.screenshot_id} />
                             </div>
                             <CopyButton text={p.url} />
                           </div>
@@ -1151,12 +1277,13 @@ export default function TargetDetail() {
                         <td className="table-cell text-xs whitespace-nowrap">{timeAgo(n.created_at)}</td>
                       </tr>
                     ))}
-                    {(tab === 'vulns' || tab === 'candidates') && (pageData as VulnFinding[]).map(v => {
+                    {(tab === 'vulns' || tab === 'candidates') && vulnGroupPage.map(group => {
+                      const v = group.representative
                       const pocUrl = buildPocUrl(v.type, v.url, v.parameter, v.payload)
                       const reproUrl = pocUrl || v.url
                       const isXss = ['xss', 'dom_xss'].includes(String(v.type || '').toLowerCase())
                       return (
-                      <tr key={v.id} className="table-row">
+                      <tr key={group.key} className="table-row">
                         <td className="table-cell whitespace-nowrap">
                           <Badge variant={v.severity}>{v.severity}</Badge>
                           {typeof v.confidence === 'number' && v.confidence > 0 && (
@@ -1168,7 +1295,15 @@ export default function TargetDetail() {
                           )}
                         </td>
                         <td className="table-cell text-xs font-mono font-semibold whitespace-nowrap">
-                          <div>{String(v.type || '').replace(/_/g, ' ')}</div>
+                          <div className="flex items-center gap-1.5">
+                            {String(v.type || '').replace(/_/g, ' ')}
+                            {group.members.length > 1 && (
+                              <span className="px-1.5 py-0.5 rounded bg-accent/15 text-accent text-[10px] font-mono shrink-0"
+                                title={`Same root cause confirmed on ${group.members.length} URLs on this host — collapsed into one finding`}>
+                                ×{group.members.length}
+                              </span>
+                            )}
+                          </div>
                           {v.lifecycle && <LifecycleChip lifecycle={v.lifecycle} />}
                         </td>
                         <td className="table-cell max-w-sm">
@@ -1186,6 +1321,7 @@ export default function TargetDetail() {
                               <CopyButton text={pocUrl} />
                             </div>
                           )}
+                          <VulnGroupAffected targetId={id!} group={group} onDone={() => loadTab(tab)} />
                         </td>
                         <td className="table-cell font-mono text-xs text-text-primary whitespace-nowrap">{v.parameter || '—'}</td>
                         <td className="table-cell text-xs text-text-muted max-w-md">
@@ -1206,6 +1342,12 @@ export default function TargetDetail() {
                                   <CopyButton text={reproUrl} />
                                 </div>
                               </div>
+                              {v.screenshot_id && (
+                                <div>
+                                  <div className="text-[10px] uppercase tracking-wider text-text-muted mb-0.5">Screenshot</div>
+                                  <ScreenshotThumb screenshotId={v.screenshot_id} />
+                                </div>
+                              )}
                               {v.payload && (
                                 <div>
                                   <div className="text-[10px] uppercase tracking-wider text-text-muted mb-0.5">Payload</div>
@@ -1270,13 +1412,14 @@ export default function TargetDetail() {
                 </table>
               </div>
             )}
-        {!tabLoading && hasMore && (
+        {!tabLoading && footerHasMore && (
           <div className="flex items-center justify-center gap-3 py-3 border-t border-border text-xs">
             <span className="text-text-muted">
-              Showing {pageData.length.toLocaleString()} of {filteredData.length.toLocaleString()}
+              Showing {footerShownCount.toLocaleString()} of {footerTotalCount.toLocaleString()}
+              {isVulnTab ? ' distinct issue(s)' : ''}
             </span>
             <button onClick={() => setVisibleCount(c => c + PAGE)} className="btn-secondary text-xs">
-              Load {Math.min(PAGE, data.length - visibleCount).toLocaleString()} more
+              Load {Math.min(PAGE, footerTotalCount - visibleCount).toLocaleString()} more
             </button>
             <button onClick={() => setVisibleCount(data.length)} className="text-accent hover:underline">
               Show all

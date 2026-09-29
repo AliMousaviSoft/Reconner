@@ -232,6 +232,7 @@ export interface AdminPanelFinding {
   evidence: string
   affected_count: number
   affected_urls: string[]
+  screenshot_id?: string
   created_at: string
 }
 
@@ -300,6 +301,7 @@ export interface VulnFinding {
   triage?: string
   triage_note?: string
   created_at: string
+  screenshot_id?: string
 }
 
 export interface MonitoringChange {

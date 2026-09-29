@@ -148,6 +148,8 @@ func RunMigrations(db *DB) error {
 		alterTasksAddCurrentAsset,
 		alterTasksAddAssetsDone,
 		alterTasksAddAssetsTotal,
+		alterAdminPanelFindingsAddScreenshotID,
+		alterVulnFindingsAddScreenshotID,
 	}
 
 	for i, m := range migrations {
@@ -1687,3 +1689,11 @@ const alterTasksAddModuleEta = `ALTER TABLE tasks ADD COLUMN module_eta_seconds 
 const alterTasksAddCurrentAsset = `ALTER TABLE tasks ADD COLUMN current_asset TEXT DEFAULT '';`
 const alterTasksAddAssetsDone = `ALTER TABLE tasks ADD COLUMN assets_done INTEGER DEFAULT 0;`
 const alterTasksAddAssetsTotal = `ALTER TABLE tasks ADD COLUMN assets_total INTEGER DEFAULT 0;`
+
+// screenshot_id links a confirmed admin panel / high-value finding to a row in
+// the (pre-existing but previously never populated) screenshots table, served
+// at /screenshots/{id}. Visual proof for a triager: an admin panel or a
+// confirmed XSS/exposed-service finding is far faster to assess with a
+// thumbnail than by reading raw evidence text alone.
+const alterAdminPanelFindingsAddScreenshotID = `ALTER TABLE admin_panel_findings ADD COLUMN screenshot_id TEXT DEFAULT '';`
+const alterVulnFindingsAddScreenshotID = `ALTER TABLE vuln_findings ADD COLUMN screenshot_id TEXT DEFAULT '';`
