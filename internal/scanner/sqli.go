@@ -440,6 +440,12 @@ func sqliBooleanPairs(ip insertionPoint) []sqliBooleanPair {
 		{b + ") AND (1=1)-- -", b + ") AND (1=2)-- -", b + ") AND (%s)-- -"},
 		{b + ")) AND ((1=1))-- -", b + ")) AND ((1=2))-- -", b + ")) AND (%s)-- -"},
 		{b + "') AND ('1'='1", b + "') AND ('1'='2", b + "') AND (%s) AND ('1'='1"},
+		// Double-quote string context inside a parenthesised predicate — the
+		// double-quote analogue of the ') form above. Some MSSQL/Postgres builds
+		// (QUOTED_IDENTIFIER off, or a hand-built ("col" = "$v") clause) sit here;
+		// without this boundary a genuinely injectable double-quote-paren param
+		// never satisfies any TRUE/FALSE pair and is a silent false negative.
+		{b + `") AND ("1"="1`, b + `") AND ("1"="2`, b + `") AND (%s) AND ("1"="1`},
 		{b + "/**/aNd/**/1=1", b + "/**/aNd/**/1=2", b + "/**/aNd/**/(%s)"},
 		{b + "'/**/aNd/**/'1'='1", b + "'/**/aNd/**/'1'='2", b + "'/**/aNd/**/(%s)/**/aNd/**/'1'='1"},
 	}
@@ -467,7 +473,14 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 	if kind, payload, evidence := s.customSQLiErrorProbe(ctx, ip, auth, base, baselineValue); kind != "" {
 		return kind, payload, evidence
 	}
-	for _, suffix := range []string{"'", `"`, "`", "')", `\")`, "\\"} {
+	// Boundary suffixes, each tried independently. Besides the bare quote/identifier
+	// forms, the parenthesis-closing boundaries ")" / "))" / "')" surface the engine
+	// error on queries whose injected value sits inside one or two parentheses
+	// (WHERE id=($v), func(($v)) …) — a bare quote there leaves the parens unbalanced
+	// and can mask the useful message, so a parameter injectable only in that context
+	// was an error-based false negative. Each match is still reproduced and required
+	// absent from the baseline, so the extra boundaries add no false positives.
+	for _, suffix := range []string{"'", `"`, "`", ")", "')", "))", "'))", `\")`, "\\"} {
 		injected := baselineValue + suffix
 		errResp, errStatus, _ := sendInjectedFull(ctx, sqliHTTPClient, ip, injected, auth)
 		if looksLikeBlockPage(errStatus, errResp) {

