@@ -69,13 +69,21 @@ type idorTarget struct {
 }
 
 func (s *IDORScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
-	// Authorization testing needs identities. Load the first-class identity
-	// registry (falls back to the legacy single auth_headers blob). Two identities
-	// are required to prove cross-user access without promoting heuristic noise.
+	// Authorization testing needs at least one identity. Load the first-class
+	// identity registry (falls back to the legacy single auth_headers blob — the
+	// common case for a target set up before multi-identity capture existed, and
+	// still the majority of real configs today). A SECOND identity unlocks the
+	// provable cross-identity BOLA path (Deep Authenticated Authorization Crawl +
+	// testCrossIdentity); with only one, IDOR falls back to the single-account
+	// differential heuristic (testTarget) — candidate-only, never a confirmed
+	// finding, never broadcast — so a legacy single-auth target still gets real
+	// IDOR coverage instead of none. Requiring 2 identities to run AT ALL (rather
+	// than only to unlock the stronger proof) silently zeroed out IDOR scanning
+	// for every single-identity target; that gap is what this fallback closes.
 	identities := LoadIdentities(ctx, s.db, targetID, secret.New(s.cfg.SessionSecret))
-	if len(identities) < 2 {
-		logFn("info", "idor", "IDOR blocked — add User A and User B to prove cross-identity BOLA safely.")
-		return BlockedPhase("two captured identities are required for IDOR/BOLA proof")
+	if len(identities) == 0 {
+		logFn("info", "idor", "IDOR skipped — no identity configured. Add User A (+ optionally User B) to arm IDOR/BOLA testing.")
+		return BlockedPhase("at least one captured identity is required for IDOR testing")
 	}
 	baseline, _ := baselineIdentity(identities)
 	// Any non-baseline identity becomes the "attacker" B for cross-identity BOLA.
@@ -86,16 +94,18 @@ func (s *IDORScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			break
 		}
 	}
-	if attacker == nil {
-		return BlockedPhase("two distinct identity roles are required (one baseline owner and one attacker)")
-	}
-	logFn("info", "idor", fmt.Sprintf("Cross-identity BOLA armed: baseline=%q attacker=%q — proving one user can read another's objects.", baseline.Label, attacker.Label))
 
-	// PRIMARY path: selecting IDOR triggers a Deep Authenticated Authorization
-	// Crawl. With two identities Reconner crawls the app independently as each user
-	// from the target ORIGIN — no prior browsing/captured traffic required.
-	n := s.runAuthzCrawlPipeline(ctx, targetID, baseline, *attacker, logFn)
-	logFn("info", "idor", fmt.Sprintf("Deep authenticated authorization crawl produced %d confirmed finding(s).", n))
+	if attacker != nil {
+		logFn("info", "idor", fmt.Sprintf("Cross-identity BOLA armed: baseline=%q attacker=%q — proving one user can read another's objects.", baseline.Label, attacker.Label))
+
+		// PRIMARY path: selecting IDOR triggers a Deep Authenticated Authorization
+		// Crawl. With two identities Reconner crawls the app independently as each
+		// user from the target ORIGIN — no prior browsing/captured traffic required.
+		n := s.runAuthzCrawlPipeline(ctx, targetID, baseline, *attacker, logFn)
+		logFn("info", "idor", fmt.Sprintf("Deep authenticated authorization crawl produced %d confirmed finding(s).", n))
+	} else {
+		logFn("info", "idor", "Single-identity IDOR (heuristic candidates only). Add a second identity (User B) for provable cross-user BOLA.")
+	}
 
 	targets := s.collectTargets(ctx, targetID)
 	if len(targets) == 0 {
@@ -118,7 +128,11 @@ func (s *IDORScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 			defer wg.Done()
 			defer func() { <-sem }()
 			var hit bool
-			hit = s.testCrossIdentity(ctx, targetID, t, baseline, *attacker, logFn)
+			if attacker != nil {
+				hit = s.testCrossIdentity(ctx, targetID, t, baseline, *attacker, logFn)
+			} else {
+				hit = s.testTarget(ctx, targetID, t, baseline.Headers, logFn)
+			}
 			if hit {
 				found.Add(1)
 			}
