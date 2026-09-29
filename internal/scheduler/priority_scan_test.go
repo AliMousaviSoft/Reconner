@@ -280,21 +280,23 @@ func TestExecuteTaskHonorsPrioritizedFlagEndToEnd(t *testing.T) {
 	}
 }
 
-// Prioritized scanning is now the DEFAULT — a task created with no
-// "prioritized"/"classic_order" token at all must still take the per-asset
-// branch. Proven the same way as the explicit-token test: current_asset gets
-// set (only runPerAssetPhase/updateAssetProgress ever writes it), which a
-// task running the plain module-by-module path would never touch.
-func TestExecuteTaskDefaultsToPrioritizedWithoutAnyToken(t *testing.T) {
+// The classic module-by-module sweep is now the DEFAULT (fast: each module
+// parallelises across every host at once). A task created with no
+// "prioritized"/"classic_order" token must take the classic branch, NOT the
+// per-asset one — proven because current_asset stays unset (only
+// runPerAssetPhase/updateAssetProgress ever writes it). The prioritized branch
+// is opt-in via the "prioritized" token (see TestExecuteTaskHonorsPrioritized-
+// FlagEndToEnd).
+func TestExecuteTaskDefaultsToClassicWithoutAnyToken(t *testing.T) {
 	s := newTestScheduler(t)
-	if _, err := s.db.Exec(`INSERT INTO targets(id,domain) VALUES('default-prio-target','example.com')`); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO targets(id,domain) VALUES('default-classic-target','example.com')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,is_alive,status_code) VALUES (?,?,?,1,200)`,
-		uuid.NewString(), "default-prio-target", "example.com"); err != nil {
+		uuid.NewString(), "default-classic-target", "example.com"); err != nil {
 		t.Fatal(err)
 	}
-	task, err := s.CreateTask("default-prio-target", []string{ModuleExposure}, 1)
+	task, err := s.CreateTask("default-classic-target", []string{ModuleExposure}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,8 +306,8 @@ func TestExecuteTaskDefaultsToPrioritizedWithoutAnyToken(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT COALESCE(current_asset,'') FROM tasks WHERE id=?`, task.ID).Scan(&currentAsset); err != nil {
 		t.Fatal(err)
 	}
-	if currentAsset == "" {
-		t.Fatalf("expected the default (no token) task to run through the per-asset branch and set current_asset, got empty")
+	if currentAsset != "" {
+		t.Fatalf("expected the default (no token) task to run the CLASSIC module-by-module branch (current_asset unset), got %q", currentAsset)
 	}
 }
 

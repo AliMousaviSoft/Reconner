@@ -87,7 +87,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   // toggle opts BACK INTO the old module-by-module order — hidden for a
   // single-asset/single-endpoint scan, which the backend already forces to
   // the classic order (nothing to rank across a scope of one).
-  const [classicOrder, setClassicOrder] = useState(false)
+  const [prioritizedScan, setPrioritizedScan] = useState(false)
   // Pre-scan authentication (single-domain web scans only). When subdomain
   // enumeration is NOT selected, the scan targets just this host, so we offer to
   // attach a logged-in session up front. With subdomain enum on, the scan spans
@@ -111,7 +111,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
     setSubBrute(true)
     setASNDiscovery(false)
     setSingleEndpoint(true)
-    setClassicOrder(false)
+    setPrioritizedScan(false)
     setAuthCookie('')
     setAuthBearer('')
 		setNetworkMode(networkOnly)
@@ -246,7 +246,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
       if (!subBrute) orderedModules.push('no_subdomain_brute')
       if (asnDiscovery) orderedModules.push('asn_discovery')
       if (scopeIsURL && singleEndpoint) orderedModules.push('single_endpoint')
-      if (!asset && classicOrder) orderedModules.push('classic_order')
+      if (!asset && prioritizedScan) orderedModules.push('prioritized')
       await startModules(orderedModules)
       addToast('success', `Scan started for ${label}`)
       onClose()
@@ -340,24 +340,24 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
           </p>
         </div>
 
-        {/* Prioritized scanning is now the DEFAULT (nothing to toggle on) —
-            main domain always first, then the full per-asset module group
-            runs on each host in score order instead of one module sweeping
-            every host first. This box opts BACK INTO the old module-by-
-            module order; hidden for a single-asset scan, which the backend
-            already forces to the classic order regardless. */}
+        {/* Classic module-by-module order is now the DEFAULT (fast: each module
+            sweeps every host at once with full cross-host concurrency). This box
+            opts INTO asset-first prioritized ordering — the top-scored host gets
+            its whole injection pipeline first so its findings surface earliest —
+            at the cost of a slower total wall-clock on large targets, since the
+            module-level cross-host concurrency is traded for per-asset ordering.
+            Hidden for a single-asset scan (nothing to prioritize among). */}
         {!asset && (
           <label className="flex items-start gap-3 rounded-lg border border-white/[.08] bg-white/[.02] p-3 cursor-pointer">
-            <input type="checkbox" checked={classicOrder} onChange={e => setClassicOrder(e.target.checked)}
+            <input type="checkbox" checked={prioritizedScan} onChange={e => setPrioritizedScan(e.target.checked)}
               className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
             <span>
-              <span className="text-xs font-medium text-text-primary">Classic module-by-module order <span className="text-text-muted font-normal">(disable prioritized scanning)</span></span>
+              <span className="text-xs font-medium text-text-primary">Prioritized (asset-first) scanning <span className="text-text-muted font-normal">(slower; surfaces top host's findings first)</span></span>
               <span className="block text-[10px] text-text-muted mt-0.5">
-                By default Reconner scores every asset found by recon (main domain always first, then WAF/tech/server/panel/size
-                signals) and runs the full injection/testing pipeline on the top-ranked host before moving to the next — the
-                same issues get found, just faster and with the most important ones surfacing first. Duplicate/wildcard-catch-all
-                and low-signal tail hosts on large targets get a light check instead of the full pipeline. Turn this ON to go back
-                to the old behavior: one module swept across every host before the next module starts.
+                By default Reconner runs each module once across every host at full concurrency (fastest). Turn this ON to instead
+                score every asset (main domain first, then WAF/tech/server/panel/size signals) and run the full injection pipeline
+                on the top-ranked host before moving to the next, with duplicate/low-signal tail hosts getting a light check. The
+                same issues get found and the most important host surfaces first, but the total scan is slower on large targets.
               </span>
             </span>
           </label>

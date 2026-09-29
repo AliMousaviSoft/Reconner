@@ -1545,19 +1545,25 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	// prioritized: score every asset (main domain always first, then WAF/tech/
 	// panel/size signals) and run the full per-asset module group on the
 	// highest-value host before moving to the next, instead of sweeping one
-	// module across every host first. DEFAULT ON — it strictly subsumes the
-	// old module-by-module order (same modules run, same total work, just
-	// reordered + a light tier for duplicate/low-signal tail hosts) and is
-	// what makes a large target's most important findings show up first
-	// instead of only after the whole multi-hour scan finishes. "classic_order"
-	// opts back into the old module-by-module sweep.
-	prioritized := true
+	// module across every host first.
+	//
+	// DEFAULT OFF. The classic module-by-module sweep runs each module ONCE
+	// target-wide, so a module internally parallelises across EVERY host at its
+	// own high concurrency. The per-asset order instead walks the scored assets
+	// one at a time, and on a large target (e.g. 80+ full-pipeline hosts) that
+	// serialisation is dramatically slower — the module-level cross-host
+	// concurrency is lost, and a scan can spend hours before the injection
+	// modules even finish. Reverted to the classic sweep as the default for
+	// speed; "prioritized" opts back into the asset-first ordering when a user
+	// specifically wants the highest-value host's findings to surface earliest
+	// and accepts the slower wall-clock.
+	prioritized := false
 	networkProfile := scanner.NetworkNormal
 	for _, m := range sentModules {
 		switch m {
-		case "prioritized": // accepted for backward compatibility; redundant with the new default
+		case "prioritized": // opt IN to asset-first ordering (slower wall-clock; classic sweep is the default)
 			prioritized = true
-		case "classic_order":
+		case "classic_order": // accepted for compatibility; classic sweep is now the default
 			prioritized = false
 		case "speed_slow":
 			speed = scanner.SpeedSlow
