@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -28,6 +29,17 @@ func TestGetXSSBrowserRetriesAfterFailedAttempt(t *testing.T) {
 		xssBrowserInst, xssBrowserLastTry = savedInst, savedTry
 		xssBrowserMu.Unlock()
 	})
+
+	// findChromePath falls back to a real PATH/absolute-path search when
+	// RECONNER_CHROME doesn't resolve — a host or CI runner (e.g. GitHub's
+	// ubuntu-latest, which ships Chrome preinstalled) that happens to have a
+	// real browser at one of those fallback locations would find it there
+	// and make the "must fail" assertions below false regardless of the env
+	// var. Neutralize both fallbacks for the duration of this test.
+	savedLookPath, savedAbsPaths := chromeLookPath, chromeAbsolutePaths
+	chromeLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	chromeAbsolutePaths = nil
+	t.Cleanup(func() { chromeLookPath, chromeAbsolutePaths = savedLookPath, savedAbsPaths })
 
 	dir := t.TempDir()
 	working := filepath.Join(dir, "working-chrome")

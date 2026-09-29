@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -76,6 +77,18 @@ func TestCaptureScreenshotReturnsEmptyWithoutBrowser(t *testing.T) {
 	db, tid := testDB(t)
 	defer db.Close()
 	dir := t.TempDir()
+
+	// Neutralize findChromePath's fallback PATH/absolute-path search — on a
+	// host or CI runner that has a real system Chrome, RECONNER_CHROME alone
+	// wouldn't stop findChromePath from finding it there, and this assertion
+	// would only pass by the accident of example.test being unreachable
+	// rather than because no browser was found (see the identical fix in
+	// xss_browser_retry_test.go for the failure this actually caused in CI).
+	savedLookPath, savedAbsPaths := chromeLookPath, chromeAbsolutePaths
+	chromeLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	chromeAbsolutePaths = nil
+	t.Cleanup(func() { chromeLookPath, chromeAbsolutePaths = savedLookPath, savedAbsPaths })
+
 	t.Setenv("RECONNER_CHROME", filepath.Join(dir, "does-not-exist"))
 	cfg := &config.Config{ScreenshotsDir: filepath.Join(dir, "shots")}
 	if got := captureScreenshot(context.Background(), db, cfg, tid, "https://example.test/"); got != "" {

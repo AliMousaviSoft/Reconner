@@ -188,32 +188,45 @@ func sweepStaleBrowserProfiles() {
 }
 
 // findChromePath locates a headless-capable Chromium/Chrome binary.
+// chromeLookPath, chromePathCandidateNames and chromeAbsolutePaths are
+// indirected (rather than inlined in findChromePath) so a test can shadow
+// them to make "no chrome available" fully hermetic — otherwise a test
+// relying on RECONNER_CHROME alone to simulate a missing browser silently
+// finds whatever real Chrome the host/CI runner happens to have installed
+// via these fallback searches, and passes for the wrong reason (or fails
+// on a runner image that ships one, as GitHub's ubuntu-latest does).
+var chromeLookPath = exec.LookPath
+
+var chromePathCandidateNames = []string{
+	"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "headless-shell",
+}
+
+// Common absolute locations (containers / Playwright bundles / macOS app
+// bundles). Reconner is frequently run directly from a Mac where Chrome is
+// not exported on PATH; omitting these silently disabled every reflected/DOM
+// runtime proof even though a browser was installed.
+var chromeAbsolutePaths = []string{
+	"/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome",
+	"/snap/bin/chromium", "/opt/google/chrome/chrome",
+	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+	"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+	"/Applications/Chromium.app/Contents/MacOS/Chromium",
+	"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+	"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+}
+
 func findChromePath() string {
 	if p := os.Getenv("RECONNER_CHROME"); p != "" {
 		if browserBinaryWorks(p) {
 			return p
 		}
 	}
-	for _, name := range []string{
-		"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "headless-shell",
-	} {
-		if p, err := exec.LookPath(name); err == nil && browserBinaryWorks(p) {
+	for _, name := range chromePathCandidateNames {
+		if p, err := chromeLookPath(name); err == nil && browserBinaryWorks(p) {
 			return p
 		}
 	}
-	// Common absolute locations (containers / Playwright bundles).
-	for _, p := range []string{
-		"/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome",
-		"/snap/bin/chromium", "/opt/google/chrome/chrome",
-		// macOS app bundles. Reconner is frequently run directly from a Mac where
-		// Chrome is not exported on PATH; omitting these silently disabled every
-		// reflected/DOM runtime proof even though a browser was installed.
-		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-		"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-		"/Applications/Chromium.app/Contents/MacOS/Chromium",
-		"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-		"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-	} {
+	for _, p := range chromeAbsolutePaths {
 		if browserBinaryWorks(p) {
 			return p
 		}
