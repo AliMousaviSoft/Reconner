@@ -67,6 +67,30 @@ func TestAnalyzeDOMXSSPrecise(t *testing.T) {
 	}
 }
 
+// TestAnalyzeDOMXSSAppendSink proves the innerHTML/outerHTML APPEND form
+// (`+= tainted`) is detected — a very common sink shape the plain `=` pattern
+// missed — while the comparison form (`=== tainted`, which reads rather than
+// assigns) stays silent so broadening the pattern adds no false positives.
+func TestAnalyzeDOMXSSAppendSink(t *testing.T) {
+	for _, tp := range []string{
+		`el.innerHTML += location.hash.slice(1);`,
+		`box.outerHTML += decodeURIComponent(location.search);`,
+		`log.innerHTML+=location.hash;`,
+	} {
+		if hits := analyzeDOMXSS(tp, true); len(hits) == 0 {
+			t.Errorf("expected a DOM-XSS hit for the append sink: %s", tp)
+		}
+	}
+	for _, fp := range []string{
+		`if (el.innerHTML === location.hash) doThing();`, // comparison, not assignment
+		`if (el.innerHTML == location.search) {}`,        // comparison, not assignment
+	} {
+		if hits := analyzeDOMXSS(fp, true); len(hits) != 0 {
+			t.Errorf("comparison must NOT be treated as an innerHTML sink: %s (got %+v)", fp, hits)
+		}
+	}
+}
+
 // TestAnalyzeDOMClobbering proves the lookup-by-name-to-sink detector fires on
 // the DOM Clobbering source shape (an attacker plants markup, not a crafted
 // URL) and stays silent on ordinary, non-lookup sinks and on lookups that

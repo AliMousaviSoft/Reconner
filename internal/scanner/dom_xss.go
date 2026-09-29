@@ -78,8 +78,14 @@ type htmlInjectionSink struct {
 // Every entry injects HTML/markup (or evaluates code), so a URL-controlled value
 // reaching it is script execution.
 var htmlInjectionSinks = []htmlInjectionSink{
-	{"innerHTML", regexp.MustCompile(`\.innerHTML\s*=\s*([^;\n]{1,160})`)},
-	{"outerHTML", regexp.MustCompile(`\.outerHTML\s*=\s*([^;\n]{1,160})`)},
+	// `\+?=` also matches the append form `innerHTML += tainted`, an extremely
+	// common DOM-XSS sink shape the plain `=` pattern silently missed (a whole
+	// class of real innerHTML/outerHTML-append sinks was a false negative). The
+	// leading `[^=;\n]` on the captured value rejects the comparison forms
+	// `innerHTML == x` / `=== x` (which read, not assign) so the broadened
+	// pattern adds no false positives.
+	{"innerHTML", regexp.MustCompile(`\.innerHTML\s*\+?=\s*([^=;\n][^;\n]{0,159})`)},
+	{"outerHTML", regexp.MustCompile(`\.outerHTML\s*\+?=\s*([^=;\n][^;\n]{0,159})`)},
 	{"insertAdjacentHTML", regexp.MustCompile(`\.insertAdjacentHTML\s*\([^,]{0,30},\s*([^;\n)]{1,160})`)},
 	{"document.write", regexp.MustCompile(`document\.write(?:ln)?\s*\(([^;\n]{1,160})`)},
 	{"document.execCommand(insertHTML)", regexp.MustCompile(`document\.execCommand\s*\(\s*['"]insertHTML['"]\s*,\s*(?:false|null)\s*,\s*([^;\n)]{1,220})`)},
