@@ -81,6 +81,54 @@ func TestSQLiErrorBasedRequiresReproduction(t *testing.T) {
 	}
 }
 
+// A host whose adaptive throttle is already severely ramped (repeated
+// 429/503/timeout, observed by ANY module) must have quickProbe's expensive
+// ladders (error-forced extraction, boolean pairs, OR-based extraction —
+// together dozens of requests per candidate) skipped entirely: continuing to
+// grind through them is what turns one struggling host into many extra
+// minutes on a large scan, per the sqlSpeed fix. This counts real requests to
+// prove it, rather than trusting the code path by inspection.
+func TestSQLiSkipsExpensiveLaddersOnSeverelyThrottledHost(t *testing.T) {
+	withLoopbackAllowed(t)
+	var reqCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&reqCount, 1)
+		w.Write([]byte("<html>ok normal stable page content here</html>"))
+	}))
+	defer srv.Close()
+
+	ip := insertionPoint{URL: srv.URL + "/?id=1", Param: "id", Method: "GET"}
+	host := hostOfURL(ip.URL)
+	hostThrottles.Delete(host)
+
+	// Baseline: healthy host runs the full ladder (error-suffix probe +
+	// error-forced extraction + boolean pairs + OR-based extraction).
+	atomic.StoreInt32(&reqCount, 0)
+	(&SQLiScanner{}).quickProbe(context.Background(), ip, nil)
+	healthyRequests := atomic.LoadInt32(&reqCount)
+	if healthyRequests < 20 {
+		t.Fatalf("expected the full ladder to make a substantial number of requests on a healthy host, got %d", healthyRequests)
+	}
+
+	// Ramp the host's throttle to its ceiling, as repeated 429/503 would.
+	for i := 0; i < 10; i++ {
+		hostThrottleObserve(host, 503, false)
+	}
+	if !hostThrottleSevere(host) {
+		t.Fatal("expected the host to be reported severely throttled after ramping")
+	}
+
+	atomic.StoreInt32(&reqCount, 0)
+	(&SQLiScanner{}).quickProbe(context.Background(), ip, nil)
+	severeRequests := atomic.LoadInt32(&reqCount)
+	// The cheap stage alone (base + 6 error suffixes) is 7 requests; allow a
+	// little headroom without allowing the expensive ladders back in.
+	if severeRequests > 10 {
+		t.Fatalf("expected a severely throttled host to skip the expensive ladders (few requests), got %d (healthy case was %d)", severeRequests, healthyRequests)
+	}
+	hostThrottles.Delete(host)
+}
+
 func TestSQLiFullEngineInjectsHeaderAndAuthenticatedCookie(t *testing.T) {
 	withLoopbackAllowed(t)
 	dbErr := "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"

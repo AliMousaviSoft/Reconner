@@ -64,6 +64,47 @@ func TestHostThrottleWaitHealthyIsInstant(t *testing.T) {
 	}
 }
 
+// hostThrottleSevere is what SQLi's expensive proof ladders check before
+// running: it must stay false on a healthy host and flip true once the
+// adaptive backoff has ramped close to its ceiling (repeated 429/503/timeout),
+// so a large multi-request ladder skips a host that's already struggling
+// instead of piling on.
+func TestHostThrottleSevere(t *testing.T) {
+	host := "severe-test.example"
+	hostThrottles.Delete(host)
+
+	if hostThrottleSevere(host) {
+		t.Fatalf("a fresh host must not be reported severe")
+	}
+	for i := 0; i < 3; i++ {
+		hostThrottleObserve(host, 200, false)
+	}
+	if hostThrottleSevere(host) {
+		t.Fatalf("a healthy host must not be reported severe")
+	}
+
+	// Ramp it to the ceiling via repeated unhealthy responses.
+	for i := 0; i < 10; i++ {
+		hostThrottleObserve(host, 503, false)
+	}
+	if throttleFor(host).backoff != throttleMax {
+		t.Fatalf("expected backoff to saturate at the ceiling before asserting severity")
+	}
+	if !hostThrottleSevere(host) {
+		t.Fatalf("a host saturated at the backoff ceiling must be reported severe")
+	}
+
+	// Recovery: enough healthy responses must bring it back below the severe
+	// threshold (severe is 3/4 of the ceiling; throttleEase easing needs several
+	// healthy responses to cross back under that bar).
+	for i := 0; i < 20; i++ {
+		hostThrottleObserve(host, 200, false)
+	}
+	if hostThrottleSevere(host) {
+		t.Fatalf("a host that has recovered with sustained healthy responses must no longer be severe")
+	}
+}
+
 func TestHostOfURL(t *testing.T) {
 	// hostOfURL (scope.go) returns the lower-cased hostname without port — fine for
 	// throttle keying, where a host's health is shared across its ports.

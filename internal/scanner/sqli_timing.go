@@ -169,6 +169,16 @@ func summarizeTTFBSamples(ds []time.Duration, requested int) (median, min, max t
 // timeBasedSQLi returns (dbms, evidence, true) only when the induced delay scales
 // LINEARLY with the injected sleep — proven server-side SLEEP, not noise.
 func (s *SQLiScanner) timeBasedSQLi(ctx context.Context, ip insertionPoint, auth map[string]string) (string, string, string, bool) {
+	// A severely throttled host is already unhealthy (recent timeouts/429/503)
+	// — exactly the conditions that make a timing-based verdict least
+	// trustworthy (network/server jitter becomes indistinguishable from an
+	// injected SLEEP) and most expensive to chase (each of the 13 DBMS sleep
+	// vectors can cost several multi-second samples before being rejected).
+	// Skip it here rather than let a single struggling host consume minutes
+	// across every timing vector.
+	if hostThrottleSevere(hostOfURL(ip.URL)) {
+		return "", "", "", false
+	}
 	baseValue := sqliBaseValue(ip)
 	// The trace begins only after the request is written, so TCP/TLS setup is not
 	// part of TTFB. quickProbe has also already warmed the shared transport in the
@@ -283,7 +293,18 @@ func (s *SQLiScanner) timeBasedPass(ctx context.Context, targetID string, candid
 		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if dbms, payload, ev, ok := s.timeBasedSQLi(ctx, ip, auth); ok {
+			// Hard per-candidate deadline. A real vulnerability confirms in well
+			// under a minute (13 sleep vectors, most rejected by one fast cheap-
+			// screen request each; a genuine hit completes its 0/2/5s scaling
+			// proof in ~15-25s). This bounds the pathological case the
+			// hostThrottleSevere gate doesn't cover — a naturally jittery but not
+			// (yet) severely-throttled host repeatedly almost-passing the cheap
+			// screen and paying for a full confirmation round on every one of the
+			// 13 DBMS vectors — so one noisy endpoint can't consume minutes.
+			timingCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			dbms, payload, ev, ok := s.timeBasedSQLi(timingCtx, ip, auth)
+			cancel()
+			if ok {
 				s.store(targetID, "sqli", "high", ip, "time_based", payload,
 					ev+" ["+ip.Method+"]")
 				found.Add(1)

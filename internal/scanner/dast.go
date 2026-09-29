@@ -643,35 +643,68 @@ func (s *DASTScanner) proveExecutingXSS(ctx context.Context, ip insertionPoint, 
 	// Real-browser execution is the only promotion path, so run it first. The old
 	// order sprayed the complete raw-response ladder (often 30+ requests) and then
 	// performed the browser proof that actually decided the verdict.
-	if b := getXSSBrowser(); b != nil {
-		if browserBudget.take() {
-			var custom []string
-			if s.cfg != nil {
-				custom = CustomCorpus(s.cfg.WordlistsDir, "xss")
-			}
-			if pl, ok := b.ConfirmInsertionWithAnalysesAndTemplates(ctx, ip, auth, analyses, custom); ok {
-				return pl, "browser", 99, true
-			}
+	if b := getXSSBrowser(); b != nil && browserBudget.take() {
+		var custom []string
+		if s.cfg != nil {
+			custom = CustomCorpus(s.cfg.WordlistsDir, "xss")
 		}
-		return "", "inconclusive", ConfCandidateLo, false
+		if pl, ok := b.ConfirmInsertionWithAnalysesAndTemplates(ctx, ip, auth, analyses, custom); ok {
+			return pl, "browser", 99, true
+		}
+		// The browser tried and didn't confirm (filtered payload, CSP, a context
+		// it can't drive) — fall through to the browserless ladder below instead
+		// of abandoning the candidate outright.
 	}
 
-	// Chromium is unavailable: inspect only a short prefix of the existing ladder
-	// to retain a useful manual-review candidate without restoring the old request
-	// explosion. Raw survival is never promoted to a finding.
-	const fallbackLimit = 6
+	// Reached when Chromium is unavailable, OR this scan's per-run browser
+	// budget (dastBrowserBudget) is already spent, OR a live browser attempt
+	// didn't confirm. This branch used to be reachable ONLY in the "no browser
+	// at all" case — the moment the budget ran out on a large target (a
+	// 1000-subdomain scope trivially produces more than 150 candidates needing
+	// browser escalation), every remaining candidate skipped straight to
+	// "inconclusive" with zero further testing, silently losing XSS coverage
+	// for the rest of the scan. The deterministic, WAF-tamper-aware browserless
+	// ladder below is a strictly-better fallback than giving up.
+	const fallbackLimit = 10
 	for i, p := range buildExecPayloads(a) {
 		if i >= fallbackLimit || ctx.Err() != nil {
 			break
 		}
-		r := sendInjectedResponse(ctx, dastClient, ip, p.Payload, auth)
-		if browserRendersResponse(r.Status, r.ContentType, r.Body, r.NoSniff) &&
-			cspAllowsInlineScript(r.CSP) && execPayloadSurvived(r.Body, p) &&
-			!execPayloadSurvived(baseline, p) {
-			return p.Payload, "differential-candidate", 85, false
+		if pl, method, ok := s.tryBrowserlessExecPayload(ctx, ip, auth, baseline, p); ok {
+			return pl, method, 85, false
 		}
 	}
 	return "", "inconclusive", ConfCandidateLo, false
+}
+
+// tryBrowserlessExecPayload sends one executing-ladder payload and, only when
+// the PLAIN attempt was actually blocked by a WAF/edge (not merely filtered by
+// the app itself — no amount of request-encoding trickery fixes that), retries
+// with WAF-bypass encodings that spell the same JavaScript differently on the
+// wire. Returns the payload that survived and a proof-method label.
+func (s *DASTScanner) tryBrowserlessExecPayload(ctx context.Context, ip insertionPoint, auth map[string]string, baseline string, p xssExecPayload) (string, string, bool) {
+	r := sendInjectedResponse(ctx, dastClient, ip, p.Payload, auth)
+	if browserRendersResponse(r.Status, r.ContentType, r.Body, r.NoSniff) &&
+		cspAllowsInlineScript(r.CSP) && execPayloadSurvived(r.Body, p) &&
+		!execPayloadSurvived(baseline, p) {
+		return p.Payload, "differential-candidate", true
+	}
+	if !looksLikeBlockPage(r.Status, r.Body) {
+		return "", "", false
+	}
+	for _, tp := range xssWAFTamperVariants(p) {
+		if ctx.Err() != nil {
+			break
+		}
+		tr := sendInjectedResponse(ctx, dastClient, ip, tp.Payload, auth)
+		if !looksLikeBlockPage(tr.Status, tr.Body) &&
+			browserRendersResponse(tr.Status, tr.ContentType, tr.Body, tr.NoSniff) &&
+			cspAllowsInlineScript(tr.CSP) && execPayloadSurvived(tr.Body, tp) &&
+			!execPayloadSurvived(baseline, tp) {
+			return tp.Payload, "differential-candidate-waf-bypass", true
+		}
+	}
+	return "", "", false
 }
 
 // cspAllowsInlineScript reports whether response CSP permits the inline event/

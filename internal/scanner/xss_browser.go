@@ -82,10 +82,10 @@ type browserXSSConfirmer struct {
 }
 
 var (
-	xssBrowserOnce sync.Once
-	xssBrowserMu   sync.RWMutex
-	xssBrowserInst *browserXSSConfirmer
-	domReflectMemo = struct {
+	xssBrowserMu      sync.RWMutex
+	xssBrowserInst    *browserXSSConfirmer
+	xssBrowserLastTry time.Time
+	domReflectMemo    = struct {
 		sync.Mutex
 		entries map[string]domReflectEntry
 	}{entries: map[string]domReflectEntry{}}
@@ -126,29 +126,55 @@ func xssBrowserOwner(ctx context.Context) string {
 
 // getXSSBrowser returns the process-wide confirmer, or nil when disabled / no
 // browser is available. Enabled unless RECONNER_NO_XSS_BROWSER is set.
+// xssBrowserRetryCooldown bounds how often a FAILED chrome-detection attempt
+// is retried. getXSSBrowser used to cache a failed lookup forever via
+// sync.Once: if findChromePath() came back empty even ONCE — a container
+// started before /usr/bin/chromium was fully in place, a transient exec
+// failure under cold-start CPU contention, anything transient — every XSS
+// scan for the rest of that process's uptime silently lost its ONLY
+// execution-proof path (see the a.Executable branch in dast.go, which
+// requires proofExecuted from the browser to ever report a CONFIRMED finding;
+// without it every real XSS candidate is stuck at VerifyInconclusive forever).
+// That is a plausible, persistent-not-intermittent explanation for "XSS stopped
+// finding anything." Retrying on a cooldown (instead of never) costs at most
+// one cheap `--version` probe every 60s when a browser is genuinely absent,
+// and fully self-heals the moment one becomes available.
+const xssBrowserRetryCooldown = 60 * time.Second
+
 func getXSSBrowser() *browserXSSConfirmer {
-	xssBrowserOnce.Do(func() {
-		if os.Getenv("RECONNER_NO_XSS_BROWSER") != "" {
-			return
-		}
-		p := findChromePath()
-		if p == "" {
-			return
-		}
-		sweepStaleBrowserProfiles() // clean anything a prior hard-kill orphaned
-		base := filepath.Join(os.TempDir(), xssProfilePrefix+strconv.Itoa(os.Getpid()))
-		xssBrowserMu.Lock()
-		xssBrowserInst = &browserXSSConfirmer{
-			chromePath:  p,
-			profileBase: base,
-			navGate:     make(chan struct{}, 1),
-		}
-		xssBrowserMu.Unlock()
-	})
 	xssBrowserMu.RLock()
-	browser := xssBrowserInst
+	if xssBrowserInst != nil {
+		b := xssBrowserInst
+		xssBrowserMu.RUnlock()
+		return b
+	}
 	xssBrowserMu.RUnlock()
-	return browser
+
+	if os.Getenv("RECONNER_NO_XSS_BROWSER") != "" {
+		return nil
+	}
+
+	xssBrowserMu.Lock()
+	defer xssBrowserMu.Unlock()
+	if xssBrowserInst != nil { // another goroutine won the race while we waited for the lock
+		return xssBrowserInst
+	}
+	if !xssBrowserLastTry.IsZero() && time.Since(xssBrowserLastTry) < xssBrowserRetryCooldown {
+		return nil
+	}
+	xssBrowserLastTry = time.Now()
+	p := findChromePath()
+	if p == "" {
+		return nil // retried again after the cooldown — never permanently disabled
+	}
+	sweepStaleBrowserProfiles() // clean anything a prior hard-kill orphaned
+	base := filepath.Join(os.TempDir(), xssProfilePrefix+strconv.Itoa(os.Getpid()))
+	xssBrowserInst = &browserXSSConfirmer{
+		chromePath:  p,
+		profileBase: base,
+		navGate:     make(chan struct{}, 1),
+	}
+	return xssBrowserInst
 }
 
 // sweepStaleBrowserProfiles removes reconner XSS browser profiles left in TempDir

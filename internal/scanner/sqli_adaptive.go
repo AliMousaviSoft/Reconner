@@ -176,18 +176,23 @@ func tamperVariants(payload string) []string {
 			out = append(out, v)
 		}
 	}
+	// Ordered most-likely-to-work first — a blocked payload stops retrying at the
+	// first variant that gets through, so this order also bounds the worst case
+	// (every variant blocked) to the fewest requests that still cover the
+	// distinct WAF-evasion CLASSES: whitespace-filter bypass, keyword-blocklist
+	// bypass, and transport-level encoding bypass. Two near-duplicate variants
+	// (a second comment style, double URL-encoding) were cut: they evade the
+	// same filter class as one already tried and rarely succeed when it failed,
+	// so they mostly cost requests on an already-struggling host without adding
+	// real bypass coverage.
 	// 1) inline comments instead of spaces (classic space-filter bypass)
 	add(strings.ReplaceAll(payload, " ", "/**/"))
-	// 2) MySQL versioned comment around spaces
-	add(strings.ReplaceAll(payload, " ", "/*!50000*/"))
-	// 3) random-case keywords (blocklist that matches exact-case tokens)
+	// 2) random-case keywords (blocklist that matches exact-case tokens)
 	add(sqliKeywordRe.ReplaceAllStringFunc(payload, toggleCase))
-	// 4) comment-space + mixed case combined
+	// 3) comment-space + mixed case combined
 	add(sqliKeywordRe.ReplaceAllStringFunc(strings.ReplaceAll(payload, " ", "/**/"), toggleCase))
-	// 5) URL-encode the whole payload
+	// 4) URL-encode the whole payload
 	add(url.QueryEscape(payload))
-	// 6) double URL-encode
-	add(url.QueryEscape(url.QueryEscape(payload)))
 	return out
 }
 

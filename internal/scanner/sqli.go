@@ -197,7 +197,16 @@ func (s *SQLiScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if kind, payload, ev := s.quickProbe(ctx, ip, auth); kind != "" {
+			// Hard per-candidate deadline: quickProbe's ladders are deterministic
+			// requests, not artificial sleeps, so a healthy host finishes in low
+			// single-digit seconds. This bounds the pathological case the
+			// hostThrottleSevere gate inside quickProbe doesn't fully cover — a
+			// host that's slow/jittery but not (yet) flagged severely throttled —
+			// so one bad endpoint can never stall the whole SQLi phase.
+			probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			kind, payload, ev := s.quickProbe(probeCtx, ip, auth)
+			cancel()
+			if kind != "" {
 				s.store(targetID, "sqli", "high", ip, kind, payload, ev+" ["+ip.Method+"/"+insertionLocation(ip)+"]")
 				found.Add(1)
 				flaggedMu.Lock()
@@ -488,6 +497,23 @@ func (s *SQLiScanner) quickProbe(ctx context.Context, ip insertionPoint, auth ma
 			}
 			return "error_based", injected, evidence
 		}
+	}
+
+	// A host whose adaptive throttle has already ramped near its ceiling has
+	// been repeatedly unhealthy (timeouts/429/503) very recently, observed
+	// across every module hitting it — not just this candidate. The remaining
+	// ladders below are SQLi's most request-heavy stages (error-forced
+	// extraction alone tries up to 26 DBMS-specific payloads, each with its own
+	// WAF-tamper retries; the boolean and OR-based ladders add dozens more).
+	// Grinding through all of that against an already-struggling host is what
+	// turns one slow/WAF-fronted endpoint into many extra minutes, and the
+	// differential signal it would produce is unreliable there anyway (the
+	// same reason looksLikeBlockPage/bodyLooksLikeWAFBlock gate every
+	// individual check below). Skip straight to the cheap, already-completed
+	// error-suffix result: "" here, so this candidate moves on fast instead of
+	// compounding the host's load.
+	if hostThrottleSevere(hostOfURL(ip.URL)) {
+		return "", "", ""
 	}
 
 	// DBMS-adaptive error-FORCED extraction (item 2): make the engine raise an

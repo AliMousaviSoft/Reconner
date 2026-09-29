@@ -86,6 +86,28 @@ func hostThrottleWait(ctx context.Context, host string) {
 	}
 }
 
+// hostThrottleSevere reports whether a host's adaptive backoff has already
+// ramped to (or near) the hard ceiling — i.e. this host has been repeatedly
+// unhealthy (timeouts / 429 / 503) very recently, observed by ANY module
+// against ANY target. A detector with a large, multi-request proof ladder
+// (SQLi's error-forced/boolean/OR-based extraction easily runs 40-80+ requests
+// per candidate) should skip that ladder entirely on such a host rather than
+// grinding through it: the extra requests just add more load to an already
+// struggling host, the differential signal is unreliable behind a WAF/rate-
+// limiter to begin with (this is what looksLikeBlockPage/bodyLooksLikeWAFBlock
+// already guard against per-response), and on a large multi-hundred-endpoint
+// target this is the dominant real-world cause of a scan taking many hours
+// longer than it needs to.
+func hostThrottleSevere(host string) bool {
+	if host == "" {
+		return false
+	}
+	st := throttleFor(host)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.backoff >= throttleMax*3/4
+}
+
 // hostThrottleObserve updates a host's backoff from one response: multiplicative
 // increase when it looks overloaded/blocked (transport error/timeout, 429, 503),
 // additive decrease when it answered cleanly. status 0 with unhealthy=true marks
