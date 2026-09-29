@@ -146,6 +146,19 @@ var wafSignatures = []wafSig{
 
 func (s wafSig) match(hdr map[string]string, server, cookies, body string) bool {
 	for h, val := range s.headers {
+		// A header key ending in "-" (e.g. Wallarm's "x-wallarm-") is a PREFIX:
+		// the vendor's real header name varies (X-Wallarm-Status, X-Wallarm-Block,
+		// …) so no single exact name is reliable. hdr[h] below is an exact-key
+		// lookup and would never match such an entry — every header must be
+		// scanned for the prefix instead, or the signature is silently dead.
+		if strings.HasSuffix(h, "-") {
+			for k, v := range hdr {
+				if strings.HasPrefix(k, h) && (val == "" || strings.Contains(v, val)) {
+					return true
+				}
+			}
+			continue
+		}
 		if v, ok := hdr[h]; ok && (val == "" || strings.Contains(v, val)) {
 			return true
 		}
