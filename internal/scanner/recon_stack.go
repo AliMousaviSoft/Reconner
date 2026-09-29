@@ -128,12 +128,25 @@ func (s *SubdomainScanner) dnsxResolve(ctx context.Context, targetID string, nam
 	if len(names) == 0 {
 		return nil
 	}
+	// Concurrency floor: a mass adaptive brute is tens of thousands of cheap DNS
+	// queries. dnsx handles a high thread count comfortably, so floor it well
+	// above the generic 50 default — resolving 30k permutation candidates at 50
+	// threads through the system resolver was taking ~15 minutes (≈33/s).
 	workers := s.cfg.Workers.SubdomainEnumeration
-	if workers <= 0 {
-		workers = 50
+	if workers < 150 {
+		workers = 150
 	}
-	if workers > 200 {
-		workers = 200
+	if workers > 400 {
+		workers = 400
+	}
+	args := []string{"-silent", "-retry", "2", "-t", fmt.Sprint(workers)}
+	// The single biggest dnsx speedup: resolve against many fast PUBLIC resolvers
+	// in parallel instead of the one (often slow/rate-limited) system resolver.
+	// Same candidate set and the wildcard-aware admission gate still re-checks
+	// every hit, so this only changes throughput, not which names are accepted.
+	if resolverFile, err := writeTempLines("recon-dnsx-resolvers-", publicResolvers); err == nil {
+		defer os.Remove(resolverFile)
+		args = append(args, "-r", resolverFile)
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -150,7 +163,7 @@ func (s *SubdomainScanner) dnsxResolve(ctx context.Context, targetID string, nam
 				seen[name] = true
 				out = append(out, name)
 			}
-		}, "dnsx", "-silent", "-retry", "2", "-t", fmt.Sprint(workers))
+		}, "dnsx", args...)
 	return out
 }
 
