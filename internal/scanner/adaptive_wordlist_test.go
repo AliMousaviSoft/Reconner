@@ -66,7 +66,7 @@ func TestAdaptiveWordlistMinesAndPersistsSafeTargetVocabulary(t *testing.T) {
 		t.Fatalf("unexpected adaptive directory paths: %v", dirPaths)
 	}
 	backupPaths := generateAdaptiveBackupCandidates([]string{"inventory"}, 1)
-	if len(backupPaths) != 4 || backupPaths[1] != "/inventory.sql" {
+	if len(backupPaths) != 6 || backupPaths[1] != "/inventory.sql" {
 		t.Fatalf("unexpected bounded adaptive backup paths: %v", backupPaths)
 	}
 }

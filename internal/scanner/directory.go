@@ -719,9 +719,24 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 	// priority) occurrence, so this changes time-to-signal without dropping any
 	// candidate from the former plan.
 	patterns := generateNestedBackupCandidates(observedURLs)
+	// Brand words: the site's own domain/subdomain labels PLUS its highest-
+	// ranked adaptive vocabulary (product names, JS chunk names, API path
+	// segments — already mined by buildAdaptiveWordlist from exactly this
+	// target's own subdomains/JS/titles/parameters). Combined with real
+	// backup-naming patterns (generateBrandedBackupCandidates), this is what
+	// finds "acmecorp_backup.zip" — a bare wordlist never guesses the site's
+	// own name, and a bare domain-name guess never combines it with a backup
+	// word. Raised from the previous 24-word/4-extension adaptive-only budget.
+	brandWords := domainBrandNames(domain)
 	if len(adaptiveWords) > 0 {
-		patterns = append(patterns, generateAdaptiveBackupCandidates(adaptiveWords[0], 24)...)
+		patterns = append(patterns, generateAdaptiveBackupCandidates(adaptiveWords[0], 50)...)
+		top := adaptiveWords[0]
+		if len(top) > 10 {
+			top = top[:10]
+		}
+		brandWords = append(brandWords, top...)
 	}
+	patterns = append(patterns, generateBrandedBackupCandidates(brandWords, 12)...)
 	patterns = append(patterns, corpus...)
 	patterns = append(patterns, generateBackupCandidates(domain)...)
 	patterns = uniquePaths(patterns)
@@ -1271,4 +1286,23 @@ var backupPatterns = []string{
 	"/backup.json", "/users.json", "/data.json", "/secrets.json", "/credentials.json",
 	"/aws.json", "/gcp.json", "/.mysql_history", "/.psql_history", "/.rediscli_history",
 	// robots.txt / sitemap.xml are normal public files — NOT backups/sensitive.
+	// ── CMS/framework AUTOMATED-BACKUP-PLUGIN paths ──────────────────────────
+	// These are where a well-known backup plugin/tool writes its OWN dumps by
+	// default — high-precision (a hit here all but names the plugin) and
+	// completely missing before: a generic wordlist never guesses a plugin's
+	// own storage convention, only its author's docs do.
+	// WordPress: UpdraftPlus, Duplicator, All-in-One WP Migration, BackWPup.
+	"/wp-content/uploads/backupbuddy_backups/", "/wp-content/updraft/",
+	"/wp-content/uploads/updraft/", "/wp-content/backup-db/",
+	"/wp-content/plugins/duplicator/", "/wp-content/backups-dup-lite/",
+	"/wp-content/ai1wm-backups/", "/wp-content/uploads/backwpup-", "/wp-snapshots/",
+	"/wp-content/wp-clone/", "/wp-content/uploads/wpvividbackups/",
+	// Joomla: Akeeba Backup (the de facto standard Joomla backup extension).
+	"/administrator/backups/", "/administrator/components/com_akeeba/backup/",
+	// Drupal: Backup and Migrate module.
+	"/sites/default/files/backup_migrate/", "/sites/default/files/backup_migrate/scheduled/",
+	// Magento.
+	"/var/backups/", "/media/backup/", "/var/export/",
+	// cPanel/Plesk-style automated full-account/domain archive naming.
+	"/backup/cpmove-backup.tar.gz", "/backups/cpmove-backup.tar.gz",
 }

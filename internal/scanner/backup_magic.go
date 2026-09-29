@@ -137,6 +137,52 @@ var backupWords = []string{
 	"db1", "db2", "db_old", "db_new",
 }
 
+// domainBrandNames extracts the site's own short "brand" word(s) from a
+// domain field — the leftmost label (e.g. "shop" from shop.example.com) and
+// the second-level domain (e.g. "example"). These are exactly the words a
+// real sysadmin names a backup after ("acmecorp_backup.zip"), which is why
+// both generateBackupCandidates (bare name) and generateBrandedBackupCandidates
+// (name combined with a backup word) start from the same extraction.
+//
+// Reuses SplitScope (a target's domain field may hold a comma/space-separated
+// multi-host list or a full endpoint URL, not just a bare hostname — the
+// single-endpoint scan flow stores one) and hostOfURL (handles a scheme, a
+// port, and IDN normalization). An earlier version of this function did its
+// own strings.Split(domain, ":")[0] BEFORE stripping any "https://" prefix,
+// which silently truncated a URL-shaped domain down to the literal word
+// "https" (the colon in "https://" was cut on first, before the scheme could
+// ever be removed) — every brand-derived candidate below it was then built
+// from garbage instead of the site's real name.
+func domainBrandNames(domain string) []string {
+	host := ""
+	if tokens, _ := SplitScope(domain); len(tokens) > 0 {
+		host = hostOfURL(tokens[0])
+	}
+	if host == "" {
+		host = hostOfURL(domain)
+	}
+	if host == "" {
+		return nil
+	}
+	parts := strings.Split(host, ".")
+	seen := map[string]bool{}
+	var out []string
+	add := func(w string) {
+		w = strings.ToLower(strings.TrimSpace(w))
+		if w != "" && !seen[w] {
+			seen[w] = true
+			out = append(out, w)
+		}
+	}
+	if len(parts) > 0 {
+		add(parts[0])
+	}
+	if len(parts) >= 2 {
+		add(parts[len(parts)-2])
+	}
+	return out
+}
+
 // generateBackupCandidates builds extra backup paths from the target domain:
 // domain-derived names, config files with backup suffixes, dated variants, and a
 // bounded wordlist — all as absolute paths (leading slash).
@@ -151,15 +197,7 @@ func generateBackupCandidates(domain string) []string {
 	}
 
 	// Base names derived from the domain: subdomain label + apex/SLD label.
-	baseNames := map[string]bool{}
-	host := strings.Split(domain, ":")[0]
-	parts := strings.Split(host, ".")
-	if len(parts) > 0 && parts[0] != "" {
-		baseNames[parts[0]] = true
-	}
-	if len(parts) >= 2 {
-		baseNames[parts[len(parts)-2]] = true
-	}
+	baseNames := domainBrandNames(domain)
 
 	// Config files + in-place backup suffixes.
 	for _, f := range backupConfigFiles {
@@ -169,7 +207,7 @@ func generateBackupCandidates(domain string) []string {
 	}
 
 	// Domain-derived names + archive extensions.
-	for name := range baseNames {
+	for _, name := range baseNames {
 		for _, ext := range backupExtensions {
 			add("/" + name + ext)
 		}
@@ -203,7 +241,7 @@ func generateAdaptiveBackupCandidates(words []string, limit int) []string {
 	if len(words) > limit {
 		words = words[:limit]
 	}
-	exts := []string{".zip", ".sql", ".tar.gz", ".bak"}
+	exts := []string{".zip", ".sql", ".tar.gz", ".bak", ".gz", ".old"}
 	out := make([]string, 0, len(words)*len(exts))
 	seen := map[string]bool{}
 	for _, raw := range words {
@@ -222,8 +260,75 @@ func generateAdaptiveBackupCandidates(words []string, limit int) []string {
 	return out
 }
 
+// backupBrandSuffixes/backupBrandPrefixes model how a real backup actually
+// gets named in practice: combined with the site's own name, not standing
+// alone. This is the single highest-yield real-world backup-naming pattern
+// (acmecorp_backup.zip, acmecorp-db-2024.sql, backup_acmecorp.tar.gz) and was
+// previously not modeled at all — domain-derived candidates only tried the
+// bare brand name (acmecorp.zip); the generic wordlist only tried bare backup
+// words (backup.zip) — never the two combined.
+var backupBrandSuffixes = []string{
+	"_backup", "-backup", "_bak", "_old", "_db", "_dump", "_full", "_copy",
+}
+
+var backupBrandPrefixes = []string{
+	"backup_", "backup-", "old_", "db_",
+}
+
+// brandBackupExts is deliberately smaller than coreBackupExts: each brand
+// word already fans out across BOTH suffixes and prefixes below, so keeping
+// the extension set tight is what keeps the per-word request cost bounded.
+var brandBackupExts = []string{".zip", ".sql", ".tar.gz", ".bak"}
+
+// generateBrandedBackupCandidates cross-products a small pool of site-
+// specific "brand" words — the domain's own name/subdomain labels and the
+// target's highest-signal adaptive vocabulary (product names, JS chunk
+// names, API path segments, all already mined by buildAdaptiveWordlist from
+// exactly the sources the caller passes in) — with the naming patterns real
+// backups actually use, plus a couple of dated variants. A generic wordlist
+// alone never guesses the site's OWN name; the bare domain-name candidates
+// never guess that it's combined with a backup word. This closes that gap.
+func generateBrandedBackupCandidates(brandWords []string, limit int) []string {
+	if len(brandWords) > limit {
+		brandWords = brandWords[:limit]
+	}
+	year := time.Now().Year()
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, raw := range brandWords {
+		word := normalizeAdaptiveWord(raw)
+		if word == "" {
+			continue
+		}
+		for _, suf := range backupBrandSuffixes {
+			for _, ext := range brandBackupExts {
+				add("/" + word + suf + ext)
+			}
+		}
+		for _, pre := range backupBrandPrefixes {
+			for _, ext := range brandBackupExts {
+				add("/" + pre + word + ext)
+			}
+		}
+		for _, y := range []int{year, year - 1} {
+			add(fmt.Sprintf("/%s_%d.zip", word, y))
+			add(fmt.Sprintf("/%s_%d.sql", word, y))
+			add(fmt.Sprintf("/%s-%d.tar.gz", word, y))
+		}
+	}
+	return out
+}
+
 const (
-	nestedBackupDirectoryBudget = 18
+	// Raised from 18 to 20 to fit "bak"/"dumps" into the static list below
+	// without shrinking the 2 slots reserved for observed application prefixes.
+	nestedBackupDirectoryBudget = 20
 	nestedBackupCandidateBudget = 256
 )
 
@@ -235,7 +340,8 @@ const (
 func generateNestedBackupCandidates(observedURLs []string) []string {
 	directories := []string{
 		"back", "backup", "backups", "old", "archive", "archives", "private",
-		"config", "configs", "conf", "data", "db", "database", "dump", "tmp", "temp",
+		"config", "configs", "conf", "data", "db", "database", "dump", "dumps",
+		"bak", "tmp", "temp",
 	}
 	seenDir := map[string]bool{}
 	orderedDirs := make([]string, 0, nestedBackupDirectoryBudget)
