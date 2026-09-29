@@ -105,9 +105,14 @@ func urlPatternMatch(pattern, url string) bool {
 	if pattern == "" {
 		return false
 	}
-	// Pure wildcard-wrapped substring: *foo* → contains "foo".
-	if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") && !strings.ContainsAny(pattern[1:len(pattern)-1], "*?[") {
+	// Pure wildcard-wrapped substring: *foo* → contains "foo". len(pattern)>=2
+	// guards the bare "*" case (a very natural "match everything" pattern to
+	// type) — pattern[1:len(pattern)-1] on a 1-byte "*" slices [1:0] and panics.
+	if len(pattern) >= 2 && strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") && !strings.ContainsAny(pattern[1:len(pattern)-1], "*?[") {
 		return strings.Contains(url, pattern[1:len(pattern)-1])
+	}
+	if pattern == "*" {
+		return true
 	}
 	if ok, err := path.Match(pattern, url); err == nil && ok {
 		return true

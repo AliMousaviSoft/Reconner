@@ -45,6 +45,18 @@ func TestFPRuleMatching(t *testing.T) {
 	}
 }
 
+// A bare "*" is the single most natural pattern an operator would type for
+// "suppress everywhere". urlPatternMatch's *foo* substring branch used to
+// slice pattern[1:len(pattern)-1] without checking length first, which for
+// a 1-byte "*" is a [1:0] slice — a panic, not a match.
+func TestURLPatternMatchBareWildcard(t *testing.T) {
+	f := FindingKey{TargetID: "t1", Type: "xss", URL: "https://x.test/anything", Parameter: "q"}
+	rule := FPRule{Enabled: true, Scope: FPGlobal, Type: "xss", URLPattern: "*"}
+	if !rule.Matches(f) {
+		t.Error("a bare \"*\" URL pattern must match (and must not panic)")
+	}
+}
+
 func TestApplyFPRulesGlobalWins(t *testing.T) {
 	f := FindingKey{TargetID: "t1", Type: "sqli", URL: "https://x.test/a"}
 	rules := []FPRule{
