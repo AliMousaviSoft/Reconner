@@ -291,34 +291,48 @@ func (b *browserXSSConfirmer) ensureTab(lease uint64) (context.Context, bool) {
 		return tab, true
 	}
 	oldTabCancel := b.tabCancel
-	if b.tabCancel != nil {
-		b.tab, b.tabCancel = nil, nil
-	}
-	if b.alloc == nil || b.alloc.Err() != nil {
-		if b.dataDir == "" {
-			b.profileSeq++
-			b.dataDir = fmt.Sprintf("%s-%d", b.profileBase, b.profileSeq)
-		}
-		opts := append(chromedp.DefaultExecAllocatorOptions[:],
-			chromedp.ExecPath(b.chromePath),
-			chromedp.UserDataDir(b.dataDir), // explicit → Chromium makes no auto temp dir
-			chromedp.Flag("headless", true),
-			chromedp.Flag("no-sandbox", true), // scans run as root in the appliance
-			chromedp.Flag("disable-gpu", true),
-			chromedp.Flag("disable-dev-shm-usage", true),
-			chromedp.Flag("disable-extensions", true),
-			chromedp.Flag("no-first-run", true),
-			chromedp.Flag("disable-background-networking", true),
-			chromedp.NoDefaultBrowserCheck,
-			chromedp.ModifyCmdFunc(configureXSSBrowserProcess),
-		)
-		b.alloc, b.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
-	}
-	alloc := b.alloc
+	oldAllocCancel := b.allocCancel
+	b.tab, b.tabCancel = nil, nil
 	b.mu.Unlock()
+	// Tear down any previous tab/allocator BEFORE launching a new one — both
+	// so a dead Chromium process fully exits before we launch a fresh one
+	// reusing the same on-disk profile dir (a live+dead process racing over
+	// the same user-data-dir corrupts Chromium's own profile lock), and so
+	// chromedp.NewExecAllocator/Run below is establishing brand-new state,
+	// never sharing an ExecAllocator across two separate chromedp.Run calls.
+	// A single ExecAllocator's Allocate() is only safe to invoke ONCE: reusing
+	// b.alloc for a second chromedp.NewContext(alloc,...)+Run to replace a
+	// dead tab raced chromedp's own internal allocator bookkeeping under
+	// concurrent DAST workers (caught by `go test -race`) — always allocating
+	// fresh trades a browser relaunch for that guarantee.
 	if oldTabCancel != nil {
 		oldTabCancel()
 	}
+	if oldAllocCancel != nil {
+		oldAllocCancel()
+	}
+
+	b.mu.Lock()
+	if b.dataDir == "" {
+		b.profileSeq++
+		b.dataDir = fmt.Sprintf("%s-%d", b.profileBase, b.profileSeq)
+	}
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(b.chromePath),
+		chromedp.UserDataDir(b.dataDir), // explicit → Chromium makes no auto temp dir
+		chromedp.Flag("headless", true),
+		chromedp.Flag("no-sandbox", true), // scans run as root in the appliance
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("no-first-run", true),
+		chromedp.Flag("disable-background-networking", true),
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.ModifyCmdFunc(configureXSSBrowserProcess),
+	)
+	b.alloc, b.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
+	alloc := b.alloc
+	b.mu.Unlock()
 
 	// Silence chromedp's CDP event logger: a newer Chromium emits enum values (e.g.
 	// network IPAddressSpace "Loopback") that this cdproto version can't unmarshal,
