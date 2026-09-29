@@ -1111,11 +1111,25 @@ func VerifyDOMXSSOnPages(ctx context.Context, db *database.DB, targetID string, 
 		return
 	}
 	// Browser proof must be broad, but it must never occupy js_analysis forever.
-	// Scale the cap with the discovered surface and bound it at two hours; every
-	// individual CDP operation has its own much shorter kill deadline as well.
-	verificationBudget := 30*time.Minute + time.Duration(len(pages))*15*time.Second
-	if verificationBudget > 2*time.Hour {
-		verificationBudget = 2 * time.Hour
+	// The budget is SPEED-PROFILE AWARE: the old fixed 30min base + 15s/page
+	// (cap 2h) ignored the scan speed entirely, so even an explicitly "fast"
+	// scan could burn 40+ minutes of serial Chromium here before the injection
+	// modules ran — the dominant front-loaded delay on a large target. Fast
+	// scans now get a tight budget (the operator asked for throughput), normal a
+	// balanced one, and slow keeps the old thorough envelope. The page loop below
+	// is ordered highest-lead-first, so a smaller budget trims the low-yield tail
+	// rather than dropping likely findings, and every individual CDP op still has
+	// its own much shorter kill deadline.
+	base, perPage, maxBudget := 12*time.Minute, 10*time.Second, 25*time.Minute
+	switch webSpeedFromCtx(ctx) {
+	case SpeedFast:
+		base, perPage, maxBudget = 5*time.Minute, 5*time.Second, 10*time.Minute
+	case SpeedSlow:
+		base, perPage, maxBudget = 30*time.Minute, 15*time.Second, 2*time.Hour
+	}
+	verificationBudget := base + time.Duration(len(pages))*perPage
+	if verificationBudget > maxBudget {
+		verificationBudget = maxBudget
 	}
 	phaseCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, verificationBudget)
