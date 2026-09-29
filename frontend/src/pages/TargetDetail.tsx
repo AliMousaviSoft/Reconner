@@ -602,6 +602,37 @@ export default function TargetDetail() {
   }
   const isSeverityTab = tab === 'nuclei' || tab === 'vulns' || tab === 'candidates'
 
+  // URLs (http) tab: optional filter by HTTP status class (2xx…5xx) before windowing.
+  const filteredData = (tab === 'http' && statusClass !== 'all')
+    ? data.filter(row => {
+        const code = Number((row as { status_code?: number })?.status_code || 0)
+        return Math.floor(code / 100) === Number(statusClass)
+      })
+    : data
+  // Windowed view of the loaded rows — only the first `visibleCount` are mounted.
+  const pageData = filteredData.slice(0, visibleCount)
+  const hasMore = filteredData.length > visibleCount
+
+  // vulns/candidates: group same-root-cause findings (a host-wide issue like
+  // Host Header Injection re-confirmed on every URL) before windowing, so the
+  // "N loaded" footer and pagination both count DISTINCT issues, not raw rows.
+  // NOTE: this useMemo (and everything above computed from plain state) must
+  // stay ABOVE the `if (loading) return …` / `if (!target) return null`
+  // guards further down — those guards mean this component's render bails
+  // out early on some renders, and a hook declared after them would then be
+  // called on some renders but not others, which is exactly React's "Rendered
+  // more hooks than during the previous render" invariant (crashed the whole
+  // page in production the moment the target finished loading).
+  const isVulnTab = tab === 'vulns' || tab === 'candidates'
+  const vulnGroups = useMemo(
+    () => (isVulnTab ? groupVulnFindings(filteredData as VulnFinding[]) : []),
+    [isVulnTab, filteredData]
+  )
+  const vulnGroupPage = vulnGroups.slice(0, visibleCount)
+  const footerShownCount = isVulnTab ? vulnGroupPage.length : pageData.length
+  const footerTotalCount = isVulnTab ? vulnGroups.length : filteredData.length
+  const footerHasMore = isVulnTab ? vulnGroups.length > visibleCount : hasMore
+
   const loadTab = async (t: string) => {
     if (!id) return
     setTabLoading(true)
@@ -687,30 +718,6 @@ export default function TargetDetail() {
   // results block right after Network Services for network targets only; web
   // targets keep their original order untouched.
   const isNetwork = target.kind === 'network'
-
-  // URLs (http) tab: optional filter by HTTP status class (2xx…5xx) before windowing.
-  const filteredData = (tab === 'http' && statusClass !== 'all')
-    ? data.filter(row => {
-        const code = Number((row as { status_code?: number })?.status_code || 0)
-        return Math.floor(code / 100) === Number(statusClass)
-      })
-    : data
-  // Windowed view of the loaded rows — only the first `visibleCount` are mounted.
-  const pageData = filteredData.slice(0, visibleCount)
-  const hasMore = filteredData.length > visibleCount
-
-  // vulns/candidates: group same-root-cause findings (a host-wide issue like
-  // Host Header Injection re-confirmed on every URL) before windowing, so the
-  // "N loaded" footer and pagination both count DISTINCT issues, not raw rows.
-  const isVulnTab = tab === 'vulns' || tab === 'candidates'
-  const vulnGroups = useMemo(
-    () => (isVulnTab ? groupVulnFindings(filteredData as VulnFinding[]) : []),
-    [isVulnTab, filteredData]
-  )
-  const vulnGroupPage = vulnGroups.slice(0, visibleCount)
-  const footerShownCount = isVulnTab ? vulnGroupPage.length : pageData.length
-  const footerTotalCount = isVulnTab ? vulnGroups.length : filteredData.length
-  const footerHasMore = isVulnTab ? vulnGroups.length > visibleCount : hasMore
 
   return (
     <ErrorBoundary>
