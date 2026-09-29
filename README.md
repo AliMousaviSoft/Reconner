@@ -84,6 +84,10 @@ resource sizing, volume ownership recovery, and troubleshooting. The shorter
 
 ## Product tour
 
+<p align="center">
+  <img src="assets/screenshot-dashboard.png" alt="Reconner dashboard overview" width="100%">
+</p>
+
 ### 1. Model the real scope
 
 Create Projects manually or import public program scope from HackerOne,
@@ -128,6 +132,11 @@ and deduplicated across hosts. Confirmed admin panels and confirmed XSS
 with live browser execution proof carry a captured screenshot alongside
 their evidence. The orange target count is reserved for actionable
 medium-or-higher findings instead of low-value inventory noise.
+
+<p align="center">
+  <img src="assets/screenshot-findings-collapsed.png" alt="Collapsed host-wide finding with affected URLs expanded" width="49%">
+  <img src="assets/screenshot-admin-panel.png" alt="Admin panel finding with a captured screenshot" width="49%">
+</p>
 
 ### 5. Keep the operation moving
 
