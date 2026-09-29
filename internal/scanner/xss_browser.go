@@ -63,7 +63,19 @@ type browserXSSConfirmer struct {
 	profileBase string // non-empty for managed, restart-safe per-session profiles
 	profileSeq  uint64
 
-	mu          sync.Mutex
+	mu sync.Mutex
+	// startMu serializes ESTABLISHING a fresh tab (the "no valid b.tab yet"
+	// path in ensureTab, down through chromedp.Run(tabCtx)). chromedp's
+	// ExecAllocator.Allocate mutates internal allocator state and is not
+	// safe to invoke concurrently for the same allocator; ensureTab reads
+	// b.alloc/b.tab under mu but then releases mu before the slow browser
+	// startup so that startup doesn't block quick "tab already exists"
+	// checks from other callers. Without startMu, two goroutines that both
+	// observe "no tab yet" at once (routine when several DAST workers hit
+	// an empty/just-reset shared tab simultaneously) both proceed to call
+	// chromedp.Run concurrently against the same allocator — a data race
+	// caught by `go test -race`, not merely a benchmark artifact.
+	startMu     sync.Mutex
 	alloc       context.Context
 	allocCancel context.CancelFunc
 	tab         context.Context // the single reused tab
@@ -260,6 +272,20 @@ func browserBinaryWorks(path string) bool {
 func (b *browserXSSConfirmer) ensureTab(lease uint64) (context.Context, bool) {
 	b.mu.Lock()
 	if b.tab != nil && b.tab.Err() == nil {
+		tab := b.tab
+		b.mu.Unlock()
+		return tab, true
+	}
+	b.mu.Unlock()
+
+	// Serialize the slow "establish a fresh tab" path across concurrent
+	// callers (see startMu's doc comment) — only one goroutine at a time may
+	// create the allocator and call chromedp.Run to start the browser.
+	b.startMu.Lock()
+	defer b.startMu.Unlock()
+
+	b.mu.Lock()
+	if b.tab != nil && b.tab.Err() == nil { // another goroutine finished while we waited
 		tab := b.tab
 		b.mu.Unlock()
 		return tab, true
