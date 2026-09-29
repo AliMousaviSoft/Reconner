@@ -5,6 +5,7 @@
 *.test
 *.out
 /detection-benchmarks.json
+/cmd/seed-demo/
 
 # ── SQLite / runtime data ──
 *.db
