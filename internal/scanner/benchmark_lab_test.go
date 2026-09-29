@@ -415,11 +415,11 @@ func benchmarkCases(t *testing.T) []benchCase {
 
 		// ── Subdomain takeover (confidence gate) ─────────────────────────────
 		{"takeover", "fingerprint + dangling DNS", true, func(t *testing.T) bool {
-			return takeoverConfidence(true, true, false) > 0
+			return takeoverConfidence(true, true, false, false) > 0
 		}},
 		{"takeover", "live ALB, no fingerprint", false, func(t *testing.T) bool {
 			// Live load balancer: no takeover fingerprint, DNS resolves.
-			return takeoverConfidence(false, false, false) > 0 || !awsNonTakeoverableInfra("app-1234.us-east-1.elb.amazonaws.com")
+			return takeoverConfidence(false, false, false, false) > 0 || !awsNonTakeoverableInfra("app-1234.us-east-1.elb.amazonaws.com")
 		}},
 	}
 	return cases

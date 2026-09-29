@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/recon-platform/internal/config"
 	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/tools"
@@ -48,31 +49,54 @@ type takeoverFingerprint struct {
 	cnames    []string
 	signature string
 	severity  string
+	// generic marks a signature phrase that is also the stock/default text of
+	// countless totally unrelated servers — "404 Not Found" and Apache's
+	// boilerplate "The requested URL was not found on this server" are the
+	// literal default body of any ordinary 404 page, provider-specific or not.
+	// A generic signature alone (no NXDOMAIN, no second-tool confirmation) is
+	// exactly the shape of a false positive: any live, perfectly claimed site
+	// that happens to 404 for an unrelated reason would otherwise match. See
+	// takeoverConfidence, which refuses to trust a generic match on its own.
+	generic bool
 }
 
 var takeoverFingerprints = []takeoverFingerprint{
-	{"GitHub Pages", []string{"github.io", "github.map.fastly.net"}, "There isn't a GitHub Pages site here", "high"},
+	{service: "GitHub Pages", cnames: []string{"github.io", "github.map.fastly.net"}, signature: "There isn't a GitHub Pages site here", severity: "high"},
 	// S3 patterns must be PRECISE. The old catch-all "amazonaws.com" swallowed every
 	// AWS hostname — ELB/ALB, CloudFront, EC2, RDS — and mislabeled a live load
 	// balancer (…-alb-….elb.amazonaws.com) as a dangling S3 bucket. These match only
 	// real object-storage / S3-website endpoints.
-	{"AWS S3", []string{"s3.amazonaws.com", ".s3.", "s3-website", "s3.dualstack", "s3-external"}, "NoSuchBucket", "high"},
-	{"Heroku", []string{"herokuapp.com", "herokudns.com", "herokussl.com"}, "No such app", "high"},
-	{"Shopify", []string{"myshopify.com"}, "Sorry, this shop is currently unavailable", "high"},
-	{"Fastly", []string{"fastly.net"}, "Fastly error: unknown domain", "medium"},
-	{"Unbounce", []string{"unbouncepages.com"}, "The requested URL was not found on this server", "medium"},
-	{"Tumblr", []string{"domains.tumblr.com"}, "Whatever you were looking for doesn't currently exist at this address", "medium"},
-	{"Ghost", []string{"ghost.io"}, "The thing you were looking for is no longer here", "medium"},
-	{"Surge.sh", []string{"surge.sh"}, "project not found", "medium"},
-	{"Bitbucket", []string{"bitbucket.io"}, "Repository not found", "high"},
-	{"Cargo", []string{"cargocollective.com"}, "404 Not Found", "low"},
-	{"Webflow", []string{"proxy.webflow.com", "proxy-ssl.webflow.com"}, "The page you are looking for doesn't exist or has been moved", "medium"},
-	{"Wordpress", []string{"wordpress.com"}, "Do you want to register", "medium"},
-	{"Pantheon", []string{"pantheonsite.io"}, "404 error unknown site", "medium"},
-	{"Azure", []string{"azurewebsites.net", "cloudapp.net", "cloudapp.azure.com", "trafficmanager.net", "blob.core.windows.net", "azureedge.net"}, "404 Web Site not found", "high"},
-	{"Readme.io", []string{"readme.io"}, "Project doesnt exist... yet!", "medium"},
-	{"Zendesk", []string{"zendesk.com"}, "Help Center Closed", "low"},
-	{"Netlify", []string{"netlify.app", "netlify.com"}, "Not Found - Request ID", "medium"},
+	{service: "AWS S3", cnames: []string{"s3.amazonaws.com", ".s3.", "s3-website", "s3.dualstack", "s3-external"}, signature: "NoSuchBucket", severity: "high"},
+	{service: "Heroku", cnames: []string{"herokuapp.com", "herokudns.com", "herokussl.com"}, signature: "No such app", severity: "high"},
+	{service: "Shopify", cnames: []string{"myshopify.com"}, signature: "Sorry, this shop is currently unavailable", severity: "high"},
+	{service: "Fastly", cnames: []string{"fastly.net"}, signature: "Fastly error: unknown domain", severity: "medium"},
+	// Apache's own stock 404.html template contains this exact sentence
+	// verbatim — it says nothing specific about Unbounce. Never trust it alone.
+	{service: "Unbounce", cnames: []string{"unbouncepages.com"}, signature: "The requested URL was not found on this server", severity: "medium", generic: true},
+	{service: "Tumblr", cnames: []string{"domains.tumblr.com"}, signature: "Whatever you were looking for doesn't currently exist at this address", severity: "medium"},
+	{service: "Ghost", cnames: []string{"ghost.io"}, signature: "The thing you were looking for is no longer here", severity: "medium"},
+	{service: "Surge.sh", cnames: []string{"surge.sh"}, signature: "project not found", severity: "medium"},
+	{service: "Bitbucket", cnames: []string{"bitbucket.io"}, signature: "Repository not found", severity: "high"},
+	// "404 Not Found" is the literal default body text of innumerable unrelated
+	// servers (stock nginx/Apache/generic-framework 404 pages). Matching it
+	// alone against a cargocollective.com CNAME would flag any ordinary,
+	// perfectly live 404 response — never trust it without NXDOMAIN/subzy too.
+	{service: "Cargo", cnames: []string{"cargocollective.com"}, signature: "404 Not Found", severity: "low", generic: true},
+	{service: "Webflow", cnames: []string{"proxy.webflow.com", "proxy-ssl.webflow.com"}, signature: "The page you are looking for doesn't exist or has been moved", severity: "medium"},
+	{service: "Wordpress", cnames: []string{"wordpress.com"}, signature: "Do you want to register", severity: "medium"},
+	{service: "Pantheon", cnames: []string{"pantheonsite.io"}, signature: "404 error unknown site", severity: "medium"},
+	{service: "Azure", cnames: []string{"azurewebsites.net", "cloudapp.net", "cloudapp.azure.com", "trafficmanager.net", "blob.core.windows.net", "azureedge.net"}, signature: "404 Web Site not found", severity: "high"},
+	{service: "Readme.io", cnames: []string{"readme.io"}, signature: "Project doesnt exist... yet!", severity: "medium"},
+	{service: "Zendesk", cnames: []string{"zendesk.com"}, signature: "Help Center Closed", severity: "low"},
+	{service: "Netlify", cnames: []string{"netlify.app", "netlify.com"}, signature: "Not Found - Request ID", severity: "medium"},
+	// Vercel's unclaimed-deployment page is specific and well-documented.
+	{service: "Vercel", cnames: []string{"vercel-dns.com", "cname.vercel-dns.com"}, signature: "DEPLOYMENT_NOT_FOUND", severity: "high"},
+	{service: "Help Scout", cnames: []string{"helpscoutdocs.com"}, signature: "No settings were found for this company", severity: "medium"},
+	{service: "UserVoice", cnames: []string{"uservoice.com"}, signature: "This UserVoice instance does not exist", severity: "medium"},
+	{service: "Intercom", cnames: []string{"custom.intercom.help"}, signature: "This page is reserved for artistic dogs", severity: "low"},
+	// The exact unclaimed-page wording for Statuspage.io is less certain than
+	// the others here, so treat a bare match as generic (never trusted alone).
+	{service: "Statuspage", cnames: []string{"statuspage.io"}, signature: "You are being redirected", severity: "low", generic: true},
 }
 
 // Run resolves CNAMEs for every subdomain and flags any that point at an
@@ -101,9 +125,27 @@ func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFun
 
 	logFn("info", "takeover", fmt.Sprintf("Checking %d subdomains for dangling CNAMEs...", len(subs)))
 
-	sem := make(chan struct{}, 20)
+	// Concurrency raised from 20 to 40: for the overwhelming majority of
+	// subdomains (no third-party CNAME at all) this stage is a single fast DNS
+	// lookup that returns in milliseconds — the workload is DNS-round-trip
+	// bound, not CPU/HTTP bound, so a higher fan-out shortens wall-clock time
+	// on a large target without materially increasing load on any one
+	// upstream (each host only ever gets its own few lookups; the heavier
+	// HTTP+subzy assessment below still only runs for the small subset that
+	// actually fingerprint-match).
+	sem := make(chan struct{}, 40)
 	var wg sync.WaitGroup
 	var found atomic.Int64
+
+	// Wildcard-zone dedup: a wildcard/catch-all DNS record makes every random,
+	// non-existent label under its zone resolve identically — the single
+	// biggest false-positive source in subdomain-takeover scanning, since a
+	// naive per-subdomain scan reports the SAME domain-wide DNS
+	// misconfiguration as dozens or hundreds of independent "findings" for
+	// hosts that were never individually configured at all. reportedWildcards
+	// ensures each affected zone is assessed and reported exactly once.
+	var wildcardMu sync.Mutex
+	reportedWildcards := map[string]bool{}
 
 	for _, sub := range subs {
 		if ctx.Err() != nil {
@@ -135,6 +177,21 @@ func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFun
 				return
 			}
 
+			// Wildcard check: is this exact CNAME just the zone's catch-all record,
+			// not something specific to `host`? If so, only ever report the ZONE
+			// once, regardless of how many real or fabricated subdomains share it.
+			wildcardNote := ""
+			if zone, wcCNAME := wildcardZoneFor(ctx, host); zone != "" && wcCNAME == cname {
+				wildcardMu.Lock()
+				already := reportedWildcards[zone]
+				reportedWildcards[zone] = true
+				wildcardMu.Unlock()
+				if already {
+					return
+				}
+				wildcardNote = fmt.Sprintf(" WILDCARD DNS: verified via 2 random non-existent probe labels under *.%s — every subdomain in this zone resolves to the identical CNAME, so this is ONE domain-wide DNS misconfiguration, not evidence that %s specifically was configured; reported once for the whole zone.", zone, host)
+			}
+
 			// Assess the claim: confidence + provenance + status (finding vs
 			// candidate). Below the surfacing cutoff → drop silently.
 			conf, provenance := s.assessTakeover(ctx, host, cname, fp)
@@ -143,7 +200,7 @@ func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFun
 				return
 			}
 
-			evidence := fmt.Sprintf("CNAME %s → %s (%s) — unclaimed resource [%d%%]", host, cname, fp.service, conf)
+			evidence := fmt.Sprintf("CNAME %s → %s (%s) — unclaimed resource [%d%%].%s", host, cname, fp.service, conf, wildcardNote)
 			s.storeVulnClassified(targetID, "subdomain_takeover", fp.severity, "https://"+host, "", cname, evidence, conf, status, provenance)
 			if status == StatusFinding {
 				found.Add(1)
@@ -162,6 +219,76 @@ func (s *TakeoverScanner) Run(ctx context.Context, targetID string, logFn LogFun
 
 	logFn("info", "takeover", fmt.Sprintf("Takeover check done. Found %d potential takeovers.", found.Load()))
 	return nil
+}
+
+// wildcardCNAMECache memoizes, per DNS zone (a host's parent domain — e.g.
+// "dev.example.com" for host "foo.dev.example.com"), whether random
+// non-existent labels under it resolve via a wildcard CNAME. Many subdomains
+// on a real target share the same immediate parent zone, and each fresh check
+// costs 2 real DNS round-trips, so this keeps a large scan from re-probing the
+// identical zone hundreds of times. Cleared implicitly per process (module-
+// level cache); a stale wildcard record disappearing between scans just means
+// one extra probe, never a correctness issue.
+var wildcardCNAMECache sync.Map // zone -> string (cname target, "" = confirmed no wildcard)
+
+// parentZone returns host's immediate parent domain — e.g. "dev.example.com"
+// for "foo.dev.example.com" — or "" when host has no PROBEABLE parent: a
+// bare single-label host, or a two-label host ("example.com") whose "parent"
+// would be a bare public suffix ("com"). Querying random labels under a raw
+// TLD is meaningless (and would just report every TLD as "wildcarded"), so
+// that case is deliberately excluded rather than probed.
+func parentZone(host string) string {
+	i := strings.Index(host, ".")
+	if i < 0 || i == len(host)-1 {
+		return ""
+	}
+	zone := host[i+1:]
+	if !strings.Contains(zone, ".") {
+		return ""
+	}
+	return zone
+}
+
+// wildcardZoneFor reports host's immediate parent zone and, if that zone has a
+// wildcard/catch-all CNAME record, the CNAME target it resolves to. Returns
+// ("", "") when host has no probeable parent zone, or the zone has no
+// wildcard.
+func wildcardZoneFor(ctx context.Context, host string) (zone, cname string) {
+	zone = parentZone(host)
+	if zone == "" {
+		return "", ""
+	}
+	if v, ok := wildcardCNAMECache.Load(zone); ok {
+		return zone, v.(string)
+	}
+	result := probeWildcardCNAME(ctx, zone, lookupCNAME)
+	wildcardCNAMECache.Store(zone, result)
+	return zone, result
+}
+
+// probeWildcardCNAME queries CNAME records (via lookup, injectable for tests)
+// for two random, guaranteed-non-existent labels under zone. If BOTH resolve
+// and agree, that CNAME is a wildcard/catch-all — no specific subdomain was
+// individually configured to point there, the zone's DNS itself is just set
+// up that way.
+func probeWildcardCNAME(ctx context.Context, zone string, lookup func(context.Context, string) (string, error)) string {
+	probe := func() string {
+		label := "rcn" + strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
+		cname, err := lookup(ctx, label+"."+zone)
+		if err != nil {
+			return ""
+		}
+		return cname
+	}
+	first := probe()
+	if first == "" {
+		return ""
+	}
+	second := probe()
+	if second == "" || second != first {
+		return ""
+	}
+	return first
 }
 
 func lookupCNAME(ctx context.Context, host string) (string, error) {
@@ -233,7 +360,10 @@ func (s *TakeoverScanner) assessTakeover(ctx context.Context, host, cname string
 		fmt.Fprintf(&prov, "subzy: vulnerable=%v\n", subzyConfirms)
 	}
 
-	conf := takeoverConfidence(sigMatch, nx, subzyConfirms)
+	if fp.generic && sigMatch && !nx && !subzyConfirms {
+		fmt.Fprintf(&prov, "note: signature %q is a generic/stock error phrase — not trusted without NXDOMAIN or subzy confirmation\n", fp.signature)
+	}
+	conf := takeoverConfidence(sigMatch, nx, subzyConfirms, fp.generic)
 	if conf == 0 {
 		fmt.Fprintf(&prov, "verdict: CNAME target resolves, no unclaimed signature, subzy negative -> CLAIMED resource, not a takeover\n")
 	}
@@ -246,7 +376,17 @@ func (s *TakeoverScanner) assessTakeover(ctx context.Context, host, cname string
 // is LIVE and CLAIMED, so the score is 0 (dropped). Merely pointing a CNAME at a
 // known provider is normal for every working site hosted there and must never, on
 // its own, surface a takeover (the services.ewa.bh live-ALB false positive).
-func takeoverConfidence(sigMatch, nx, subzyConfirms bool) int {
+//
+// generic downgrades a body-signature match that is ALSO the stock/default
+// text of countless unrelated servers ("404 Not Found", Apache's boilerplate
+// "The requested URL was not found on this server") — such a match is treated
+// as no signal at all unless paired with a real DNS-level dangling signal
+// (NXDOMAIN) or a second tool's independent confirmation. A provider-specific
+// phrase never needs this: it is evidence on its own.
+func takeoverConfidence(sigMatch, nx, subzyConfirms, generic bool) int {
+	if generic && sigMatch && !nx && !subzyConfirms {
+		sigMatch = false
+	}
 	switch {
 	case sigMatch && subzyConfirms:
 		return ConfMultiTool // 95 — two tools agree
