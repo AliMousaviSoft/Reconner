@@ -205,8 +205,17 @@ func (s *DirScanner) captureAdminPanelScreenshot(targetID, rawURL string) {
 // classifyStoredServicePanels catches panels mounted at / on dedicated hosts
 // without sending another request; HTTP probing has already stored their title,
 // server and technology fingerprint.
-func (s *DirScanner) classifyStoredServicePanels(targetID string) {
-	rows, err := s.db.Query(`SELECT url,status_code,COALESCE(title,''),COALESCE(server,''),COALESCE(technologies,'')
+//
+// Respects the per-asset host scope (ctx): DirDiscovery is a per-asset module,
+// so in a prioritized scan Run() is invoked once per asset with ctx pinned via
+// WithHostScope. Without the urlHostInScope gate this method would (a) classify
+// and store admin-panel findings for EVERY host in the target even when the scan
+// was scoped to one asset — the same scope leak already fixed for IDOR/smuggling
+// — and (b) re-scan the whole http_services table once per asset (N× redundant
+// work on a large target). urlHostInScope is a no-op when scope is unset, so a
+// full-target scan still classifies every stored service exactly as before.
+func (s *DirScanner) classifyStoredServicePanels(ctx context.Context, targetID string) {
+	rows, err := s.db.QueryContext(ctx, `SELECT url,status_code,COALESCE(title,''),COALESCE(server,''),COALESCE(technologies,'')
 		FROM http_services WHERE target_id=? AND status_code BETWEEN 200 AND 403`, targetID)
 	if err != nil {
 		return
@@ -216,6 +225,9 @@ func (s *DirScanner) classifyStoredServicePanels(targetID string) {
 		var rawURL, title, server, technologies string
 		var status int
 		if rows.Scan(&rawURL, &status, &title, &server, &technologies) == nil {
+			if !urlHostInScope(ctx, rawURL) {
+				continue
+			}
 			s.storeAdminPanel(targetID, rawURL, status, title, nil, "", server+" "+technologies)
 		}
 	}

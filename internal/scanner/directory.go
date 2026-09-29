@@ -348,7 +348,7 @@ func (s *DirScanner) loadHTTPServices(ctx context.Context, targetID string) (ser
 
 func (s *DirScanner) Run(ctx context.Context, targetID string, logFn LogFunc) error {
 	logFn("info", "dir_discovery", "Starting directory discovery...")
-	s.classifyStoredServicePanels(targetID)
+	s.classifyStoredServicePanels(ctx, targetID)
 
 	services, totalAlive := s.loadHTTPServices(ctx, targetID)
 	if len(services) == 0 {
