@@ -229,13 +229,19 @@ func (s *VulnScanner) RunPrototypePollution(ctx context.Context, targetID string
 		go func(ip insertionPoint) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			payload, evidence, confidence := prototypeJSONProof(ctx, ip, auth)
-			if evidence == "" {
+			if payload, evidence, confidence := prototypeJSONProof(ctx, ip, auth); evidence != "" {
+				s.storeVulnPoint(targetID, "prototype_pollution", "high", ip, payload, evidence, "dual-json-prototype-replay", confidence)
+				found.Add(1)
+				logFn("warn", "proto_pollution", "JSON prototype pollution confirmed: "+ip.URL)
 				return
 			}
-			s.storeVulnPoint(targetID, "prototype_pollution", "high", ip, payload, evidence, "dual-json-prototype-replay", confidence)
-			found.Add(1)
-			logFn("warn", "proto_pollution", "JSON prototype pollution confirmed: "+ip.URL)
+			// Non-reflective server-side prototype pollution: confirm via a behavioural
+			// gadget (json-spaces indentation / status override) that needs no echo.
+			if payload, evidence, method, confidence := prototypeBehavioralProof(ctx, ip, auth); evidence != "" {
+				s.storeVulnPoint(targetID, "prototype_pollution", "high", ip, payload, evidence, method, confidence)
+				found.Add(1)
+				logFn("warn", "proto_pollution", "Server-side prototype pollution confirmed (behavioural gadget): "+ip.URL)
+			}
 		}(point)
 	}
 	wg.Wait()
@@ -279,7 +285,11 @@ func buildPrototypeJSONBody(ip insertionPoint, key string, value any) (string, b
 	if json.Unmarshal([]byte(base), &object) != nil {
 		return "", false
 	}
-	object[key] = value
+	// An empty key yields the CLEAN base body (used as the behavioural-gadget
+	// baseline/control) — never inject a "" property.
+	if key != "" {
+		object[key] = value
+	}
 	encoded, err := json.Marshal(object)
 	return string(encoded), err == nil
 }
