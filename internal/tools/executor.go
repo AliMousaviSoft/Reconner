@@ -164,16 +164,57 @@ func (e *Executor) RunWithCallback(ctx context.Context, taskID string, callback 
 		}
 	}()
 
+	// Keep a bounded tail of stderr so a non-zero exit can report WHY, not just
+	// "exit status N". A tool that rejects a flag (httpx exit status 2) or dies on
+	// startup writes the reason here; without it the operator only sees the code
+	// and a scan can silently collapse to zero results.
+	var errTail stderrTail
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			e.logger.Debug("Tool stderr", "tool", name, "line", scanner.Text())
+			line := scanner.Text()
+			e.logger.Debug("Tool stderr", "tool", name, "line", line)
+			errTail.add(line)
 		}
 	}()
 
 	wg.Wait()
-	return cmd.Wait()
+	if err := cmd.Wait(); err != nil {
+		if tail := errTail.string(); tail != "" {
+			return fmt.Errorf("%w: %s", err, tail)
+		}
+		return err
+	}
+	return nil
+}
+
+// stderrTail keeps the last few non-empty stderr lines of a streamed tool run so
+// a failure can surface the tool's own message. Bounded so a chatty tool cannot
+// grow it without limit.
+type stderrTail struct {
+	lines []string
+}
+
+func (t *stderrTail) add(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	const maxLines = 5
+	t.lines = append(t.lines, line)
+	if len(t.lines) > maxLines {
+		t.lines = t.lines[len(t.lines)-maxLines:]
+	}
+}
+
+func (t *stderrTail) string() string {
+	out := strings.TrimSpace(strings.Join(t.lines, "; "))
+	const maxLen = 400
+	if len(out) > maxLen {
+		out = out[:maxLen] + "…"
+	}
+	return out
 }
 
 // safeCallback runs a per-line callback with panic recovery. A callback panics

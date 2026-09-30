@@ -57,6 +57,53 @@ func TestToolFreeExecutorDisablesInputVariants(t *testing.T) {
 	}
 }
 
+func TestRunWithCallbackSurfacesStderrOnFailure(t *testing.T) {
+	t.Parallel()
+	exec := NewExecutor(&config.Config{}, logger.New("error"))
+	// Mimic a tool that rejects a flag and exits non-zero (httpx exit status 2):
+	// the returned error must carry the tool's own stderr message, not just the code.
+	err := exec.RunWithCallback(context.Background(), "task", nil, "sh",
+		"-c", "echo 'flag provided but not defined: -bogus' 1>&2; exit 2")
+	if err == nil {
+		t.Fatal("expected a non-zero-exit error")
+	}
+	if !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("error must include the stderr reason, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 2") {
+		t.Fatalf("error must still include the exit code, got: %v", err)
+	}
+}
+
+func TestRunWithCallbackNoErrorOnCleanExit(t *testing.T) {
+	t.Parallel()
+	exec := NewExecutor(&config.Config{}, logger.New("error"))
+	var lines []string
+	err := exec.RunWithCallback(context.Background(), "task", func(l string) { lines = append(lines, l) },
+		"sh", "-c", "echo one; echo two; echo noise 1>&2")
+	if err != nil {
+		t.Fatalf("clean exit must not error even with stderr output, got: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 stdout lines, got %v", lines)
+	}
+}
+
+func TestStderrTailBounded(t *testing.T) {
+	var tail stderrTail
+	for i := 0; i < 20; i++ {
+		tail.add(strings.Repeat("x", 100))
+	}
+	tail.add("") // blank lines ignored
+	got := tail.string()
+	if got == "" {
+		t.Fatal("tail should retain recent lines")
+	}
+	if len(got) > 400+len("…") { // maxLen 400 + the 3-byte ellipsis rune
+		t.Fatalf("tail must be length-bounded, got %d", len(got))
+	}
+}
+
 func TestToolNameValidatorAllowsCuratedBareNames(t *testing.T) {
 	for _, name := range []string{"httpx", "python3", "nuclei-templates", "tool_v2.1", "c++"} {
 		if err := validateToolName(name); err != nil {

@@ -144,10 +144,10 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	}
 	args = append(args, ToolRequestIdentityArgs(ctx, "httpx")...)
 
-	if s.exec.IsToolAvailable("httpx") {
-		var mu sync.Mutex
-		probed := 0
+	var mu sync.Mutex
+	probed := 0
 
+	if s.exec.IsToolAvailable("httpx") {
 		err = s.exec.RunWithCallback(ctx, targetID, func(line string) {
 			var out httpxOutput
 			if err := json.Unmarshal([]byte(line), &out); err != nil {
@@ -175,9 +175,26 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 		}
 	} else {
 		logFn("info", "http_probe", "httpx not available, using basic HTTP probing...")
+	}
+
+	// Resilience gate: httpx is the whole scan's front door — every downstream
+	// module (JS, params, crawl, all injection scanners) consumes http_services.
+	// If httpx was missing, errored (e.g. a flag the installed build rejects →
+	// exit status 2), or simply stored NOTHING for a non-empty host list, fall
+	// back to the native Go prober so a single tool hiccup can't silently collapse
+	// the entire scan to zero results.
+	if ctx.Err() == nil && probed == 0 && len(hosts) > 0 {
+		if s.exec.IsToolAvailable("httpx") {
+			logFn("warn", "http_probe", "httpx returned no live services — falling back to the native HTTP prober so the scan can proceed.")
+		}
 		if err := s.basicHTTPProbe(ctx, targetID, hosts, logFn); err != nil {
 			return err
 		}
+		var recovered int
+		_ = s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM http_services WHERE target_id = ? AND COALESCE(source,'probe')='probe'`,
+			targetID).Scan(&recovered)
+		logFn("info", "http_probe", fmt.Sprintf("Native prober recovered %d live HTTP service(s).", recovered))
 	}
 
 	// Fingerprint the WAF/edge AND the CMS on each live host: the WAF name shows in
