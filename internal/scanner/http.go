@@ -203,6 +203,11 @@ func (s *HTTPScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	// false positives on it.
 	s.fingerprintHosts(ctx, targetID, logFn)
 
+	// Authenticated-session preflight: validate configured identities NOW, at the
+	// front of the scan, so an expired login is surfaced before every downstream
+	// injection/authz module wastes itself against the logged-out app.
+	PreflightSessions(ctx, s, targetID, logFn)
+
 	logFn("info", "http_probe", "HTTP probing complete")
 	return nil
 }
