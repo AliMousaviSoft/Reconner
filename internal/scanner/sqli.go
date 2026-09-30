@@ -261,7 +261,9 @@ func (s *SQLiScanner) plantBlindSQLi(ctx context.Context, targetID string, logFn
 	auth := loadAuthHeaders(ctx, s.db, targetID)
 	n := o.plantClass(ctx, s.db, targetID, points, auth, "sqli",
 		nil, // OOB SQL functions are tried on every param, as before
-		func(_ insertionPoint, cb string) []string { return sqliOOBPayloads(cb, o.callbackHost) })
+		func(_ insertionPoint, cb string) []string {
+			return sqliOOBPayloads(cb, o.callbackHost, o.dnsHostFor(oobTokenFromCB(cb)))
+		})
 	if n > 0 {
 		logFn("info", "sqli", fmt.Sprintf("Planted %d blind-SQLi OOB probe(s); execution reported via callback.", n))
 	}

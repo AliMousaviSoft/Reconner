@@ -176,7 +176,9 @@ func (s *CmdiScanner) plantBlindRCE(ctx context.Context, targetID string, logFn 
 	auth := loadAuthHeaders(ctx, s.db, targetID)
 	n := o.plantClass(ctx, s.db, targetID, points, auth, "rce",
 		nil, // shell-metacharacter payloads are injected on every param, as before
-		func(_ insertionPoint, cb string) []string { return rceOOBPayloads(cb) })
+		func(_ insertionPoint, cb string) []string {
+			return rceOOBPayloads(cb, o.dnsHostFor(oobTokenFromCB(cb)))
+		})
 	if n > 0 {
 		logFn("info", "cmdi", fmt.Sprintf("Planted %d blind-RCE OOB probe(s); execution reported via callback.", n))
 	}

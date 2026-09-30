@@ -211,6 +211,21 @@ type Config struct {
 	// port 1389. Needs BlindXSSCallbackURL set (for the reachable host) and this
 	// port open to the target. Only bound in serve mode.
 	OOBRawPort int `json:"oob_raw_port"`
+	// OOBDNSZone is a DNS zone delegated to THIS platform (e.g. "oob.example.com",
+	// with an NS record pointing the zone at this host's public IP). When set, the
+	// service runs an authoritative DNS listener for the zone and blind detectors
+	// gain a DNS out-of-band channel: a probe host is <token>.<zone>, and ANY DNS
+	// lookup of it — even from a target that can resolve DNS but cannot open an
+	// outbound HTTP/LDAP connection to us (strict egress filtering, DNS-only exfil)
+	// — is caught and correlated by token. This is the Collaborator/interactsh-class
+	// channel and the single most reliable OOB signal. Empty ⇒ DNS OOB disabled
+	// (HTTP /oob and raw JNDI listeners still work). Requires OOBDNSPort reachable
+	// (UDP+TCP) from the internet. Only bound in serve mode.
+	OOBDNSZone string `json:"oob_dns_zone"`
+	// OOBDNSPort is the UDP+TCP port the authoritative DNS OOB listener binds. 0 ⇒
+	// the canonical DNS port 53 (needs privilege / CAP_NET_BIND_SERVICE). Set a high
+	// port only if a front-end forwards :53 to it.
+	OOBDNSPort int `json:"oob_dns_port"`
 	// EnableDAST turns on Reconner's native context-aware DAST engine — per-
 	// parameter reflection-context classification + differential markup-injection
 	// confirmation (XSS) and broken-quote error-differential (SQLi candidates for
@@ -554,6 +569,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("RECON_BLIND_XSS_CALLBACK_URL"); v != "" {
 		c.BlindXSSCallbackURL = v
+	}
+	if v := os.Getenv("RECON_OOB_DNS_ZONE"); v != "" {
+		c.OOBDNSZone = v
 	}
 	if v := os.Getenv("RECON_SHODAN_KEY"); v != "" {
 		c.ShodanAPIKey = v

@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ type oobCapability struct {
 	callbackHost string // host[:port] of the public callback (for http payloads)
 	oobHost      string // bare host for raw JNDI/LDAP listeners
 	rawPort      int
+	dnsZone      string // delegated DNS OOB zone (e.g. "oob.example.com"); "" ⇒ no DNS channel
 }
 
 // newOOBCapability resolves the OOB endpoints from config. ok=false when no
@@ -55,11 +57,44 @@ func newOOBCapability(cfg *config.Config) (oobCapability, bool) {
 		callbackHost: u.Host,
 		oobHost:      u.Hostname(),
 		rawPort:      rawPort,
+		dnsZone:      normalizeOOBZone(cfg.OOBDNSZone),
 	}, true
+}
+
+// normalizeOOBZone reduces a configured DNS OOB zone to a bare, lowercase,
+// dot-trimmed hostname (any scheme/port stripped), or "" if it isn't usable.
+func normalizeOOBZone(raw string) string {
+	z := strings.ToLower(strings.TrimSpace(raw))
+	if z == "" {
+		return ""
+	}
+	if i := strings.Index(z, "://"); i >= 0 {
+		z = z[i+3:]
+	}
+	z = strings.Trim(z, ".")
+	if h, _, err := net.SplitHostPort(z); err == nil && h != "" {
+		z = h
+	}
+	if z == "" || !strings.Contains(z, ".") {
+		return "" // a zone with no dot can't be a delegated subdomain
+	}
+	return z
 }
 
 func (o oobCapability) callbackURL(token string) string {
 	return strings.TrimRight(o.callbackBase, "/") + "/oob/" + token
+}
+
+// dnsHostFor returns the DNS OOB hostname for a probe token (<token>.<zone>), or
+// "" when no DNS zone is configured. Any lookup of this name — even one the target
+// only resolves and never connects to — is caught by the authoritative DNS
+// listener and correlated by token, so it is the channel of last resort for a
+// DNS-only-egress target.
+func (o oobCapability) dnsHostFor(token string) string {
+	if o.dnsZone == "" || token == "" {
+		return ""
+	}
+	return token + "." + o.dnsZone
 }
 
 // plantClass registers one probe of `kind` for each insertion point matching

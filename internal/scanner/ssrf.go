@@ -355,7 +355,9 @@ func (s *SSRFScanner) plantBlindSSRF(ctx context.Context, targetID string, logFn
 	auth := loadAuthHeaders(ctx, s.db, targetID)
 	n := o.plantClass(ctx, s.db, targetID, points, auth, "ssrf",
 		nil,
-		func(ip insertionPoint, cb string) []string { return ssrfOOBPayloads(cb, o.callbackHost, ip.Value) })
+		func(ip insertionPoint, cb string) []string {
+			return ssrfOOBPayloads(cb, o.callbackHost, ip.Value, o.dnsHostFor(oobTokenFromCB(cb)))
+		})
 	if n > 0 {
 		logFn("info", "ssrf", fmt.Sprintf("Planted %d blind-SSRF OOB probe(s); execution reported via callback.", n))
 	}

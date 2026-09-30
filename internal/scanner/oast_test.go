@@ -8,7 +8,7 @@ import (
 func TestSQLiOOBPayloadsCoverEngines(t *testing.T) {
 	cb := "http://oob.example.com:8080/oob/rcnoobABC"
 	host := "oob.example.com:8080"
-	ps := sqliOOBPayloads(cb, host)
+	ps := sqliOOBPayloads(cb, host, "")
 	if len(ps) < 6 {
 		t.Fatalf("expected a broad OOB SQLi set, got %d", len(ps))
 	}

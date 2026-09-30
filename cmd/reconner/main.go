@@ -144,6 +144,22 @@ func run() error {
 		}
 	}
 
+	// Authoritative DNS OOB listener: catches DNS-only-egress blind callbacks
+	// (blind SSRF/SQLi/XXE that can resolve but not connect). Needs a zone
+	// delegated to this host; independent of the HTTP callback URL.
+	if app.cfg.OOBDNSZone != "" {
+		if closer, err := app.handler.StartOOBDNSListener(app.cfg.OOBDNSZone, app.cfg.OOBDNSPort); err != nil {
+			fmt.Printf("%s  DNS OOB listener not started: %v%s\n", cDim, err, cReset)
+		} else {
+			defer closer.Close()
+			port := app.cfg.OOBDNSPort
+			if port <= 0 {
+				port = 53
+			}
+			fmt.Printf("%s  DNS OOB listener on :%d (authoritative for %s)%s\n", cDim, port, app.cfg.OOBDNSZone, cReset)
+		}
+	}
+
 	srv := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", app.cfg.Host, app.cfg.Port),
 		Handler:      app.handler.Router(),
