@@ -95,6 +95,11 @@ func (s *CORSScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	}
 	wg.Wait()
 
+	// WebSocket analogue of a credentialed CORS misconfig: Cross-Site WebSocket
+	// Hijacking. Runs in the same phase since it's the same cross-origin trust bug
+	// on the ws:// transport, which the HTTP CORS probes structurally can't see.
+	s.checkCSWSH(ctx, targetID, logFn)
+
 	logFn("info", "cors", fmt.Sprintf("CORS check done. Found %d.", found.Load()))
 	return nil
 }
