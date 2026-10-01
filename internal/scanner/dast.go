@@ -126,6 +126,14 @@ func (s *DASTScanner) run(ctx context.Context, targetID string, logFn LogFunc, x
 	if xssOnly {
 		points = loadXSSInsertionPoints(ctx, s.db, targetID, pointLimit)
 	}
+	// Reflective request HEADERS are a whole source class the parameter table
+	// never captures: Referer / X-Forwarded-Host / User-Agent and friends are
+	// frequently echoed unencoded into an HTML response (error pages, "you came
+	// from" banners, debug footers). Inject the same context-aware probe into them
+	// and confirm through the identical breakout proof — so it finds a real class
+	// of reflected XSS with ZERO new false-positive path. Bounded to the alive
+	// roots so it never multiplies the request budget unreasonably.
+	points = append(points, s.xssHeaderInsertionPoints(ctx, targetID)...)
 	RecordCoverage(ctx, CoverageDiscovered, int64(len(points)))
 	RecordCoverage(ctx, CoverageEligible, int64(len(points)))
 	auth := loadAuthHeaders(ctx, s.db, targetID)
@@ -843,4 +851,55 @@ func sqlErrorAppeared(baseline, injected string) bool {
 // locOf maps an insertion point to a candidate location string.
 func locOf(ip insertionPoint) string {
 	return insertionLocation(ip)
+}
+
+// xssReflectiveHeaders are request headers an application most often echoes back
+// into an HTML response. Each becomes a header insertion point for the reflected-
+// XSS engine. (Host is deliberately excluded — the host-header-injection module
+// owns it, and mutating Host breaks routing on vhosted targets.)
+var xssReflectiveHeaders = []string{
+	"Referer", "User-Agent", "X-Forwarded-Host", "X-Forwarded-For",
+	"X-Forwarded-Proto", "X-Forwarded-Server", "X-Host", "X-Original-URL",
+	"X-Rewrite-URL", "X-Api-Version", "True-Client-IP", "X-Real-IP",
+	"Origin", "Accept-Language", "X-Requested-With",
+}
+
+// xssHeaderInsertionPoints builds header insertion points over the target's alive
+// roots so the reflected-XSS engine also tests header reflection. Bounded: a small
+// set of roots × the reflective header list, deduped per host.
+func (s *DASTScanner) xssHeaderInsertionPoints(ctx context.Context, targetID string) []insertionPoint {
+	const rootCap = 40
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT url FROM http_services
+		WHERE target_id = ? AND status_code BETWEEN 200 AND 403
+		  AND COALESCE(source,'probe') IN ('probe','seed')
+		ORDER BY LENGTH(url) ASC LIMIT ?`, targetID, rootCap)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []insertionPoint
+	seenHost := map[string]bool{}
+	for rows.Next() {
+		var u string
+		if rows.Scan(&u) != nil || strings.TrimSpace(u) == "" {
+			continue
+		}
+		if !urlHostInScope(ctx, u) || !urlInEndpointScope(ctx, u) {
+			continue
+		}
+		// One representative URL per host keeps header testing bounded; header
+		// reflection is a host-level behaviour, not a per-path one.
+		h := hostOf(u)
+		if h == "" || seenHost[h] {
+			continue
+		}
+		seenHost[h] = true
+		for _, hdr := range xssReflectiveHeaders {
+			out = append(out, insertionPoint{
+				URL: u, Param: hdr, Value: "", Method: http.MethodGet, Location: "header",
+			})
+		}
+	}
+	return out
 }
