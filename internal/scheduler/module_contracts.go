@@ -63,4 +63,6 @@ var V3ModuleContracts = map[string]ModuleContract{
 	ModuleWPDetect:        {"detector", "live HTTP service", "every in-scope host root probed for the WordPress detection gate", "WordPress-unique signal (wp/v2 REST namespace or wp-login credential form) recorded in wp_sites", "scanner/wordpress_test.go"},
 	ModuleWPEnum:          {"detector", "WordPress host confirmed by the detection gate", "core version plus referenced/probed plugins and themes enumerated", "version read from an authoritative source; plugin/theme confirmed by its own asset or readme", "scanner/wordpress_test.go"},
 	ModuleWPUsers:         {"detector", "WordPress host confirmed by the detection gate", "REST, author-archive and oembed user sources attempted", "username returned by WordPress itself (never inferred)", "scanner/wordpress_test.go"},
+	ModuleWPConfig:        {"detector", "WordPress host confirmed by the detection gate", "wp-config backup/swap variants, debug.log and sensitive-dir listings probed", "served body carries the raw config source / PHP error log / genuine autoindex", "scanner/wordpress_test.go"},
+	ModuleWPBackups:       {"detector", "WordPress host confirmed by the detection gate", "plugin backup directories and installer/archive paths probed", "magic-byte-confirmed archive, genuine autoindex, or plugin installer wizard markers", "scanner/wordpress_test.go"},
 }

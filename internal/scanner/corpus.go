@@ -74,6 +74,8 @@ var corpusSpecs = map[string]corpusSpec{
 	"basic_auth_passwords": {"HTTP Basic passwords", "wordlist", "Top 1000 deterministic common-password candidates for the explicit network Basic-auth audit.", defaultBasicAuthPasswords},
 	"wp_plugins":           {"WordPress plugin slugs", "wordlist", "Most-installed plugin slugs probed (readme.txt-confirmed) by WordPress enumeration.", func() []string { return append([]string{}, wpTopPluginSlugs...) }},
 	"wp_themes":            {"WordPress theme slugs", "wordlist", "Common theme slugs probed (style.css-confirmed) by WordPress enumeration.", func() []string { return append([]string{}, wpTopThemeSlugs...) }},
+	"wp_config_paths":      {"WordPress config leaks", "wordlist", "wp-config backup/editor-swap variants probed (content-confirmed) by WordPress config-exposure scanning.", func() []string { return append([]string{}, wpConfigLeakPaths...) }},
+	"wp_backup_paths":      {"WordPress backup paths", "wordlist", "Plugin-generated backup directories and fixed installer/archive paths probed (magic-byte/listing-confirmed) by WordPress backup discovery.", func() []string { return append([]string{}, wpBackupProbePaths...) }},
 	"xss":                  {"XSS", "payload", "Browser-proof templates. Each template must set top.document.title to the single %s nonce.", xssBrowserPayloads},
 	"sqli":                 {"SQL injection", "payload", "Supplemental error-based SQL injection probes, replayed before a finding is accepted.", func() []string { return []string{"'", `"`, "' OR '1'='1'-- -", "1 AND 1=1", "1 AND 1=2"} }},
 	"lfi":                  {"LFI / traversal", "payload", "Local-file inclusion and traversal probes.", func() []string { return append([]string{}, lfiPayloads...) }},

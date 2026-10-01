@@ -62,6 +62,27 @@ func fakeWordPress() http.Handler {
 		w.Header().Set("Content-Type", "text/css")
 		_, _ = w.Write([]byte("/*\nTheme Name: Astra\nVersion: 4.5.0\n*/\n"))
 	})
+	// Exposed wp-config backup leaking the DB credentials.
+	mux.HandleFunc("/wp-config.php.bak", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("<?php\ndefine('DB_NAME', 'wp');\ndefine('DB_USER', 'root');\ndefine('DB_PASSWORD', 's3cr3t');\n"))
+	})
+	// World-readable debug.log.
+	mux.HandleFunc("/wp-content/debug.log", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("[18-Jan-2026 01:30:22 UTC] PHP Warning: include(): failed opening '/var/www/x.php'\n"))
+	})
+	// UpdraftPlus backup directory with autoindex listing + a downloadable gz dump.
+	mux.HandleFunc("/wp-content/updraft/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><title>Index of /wp-content/updraft</title></head><body>
+<h1>Index of /wp-content/updraft</h1><a href="../">Parent Directory</a>
+<a href="backup_2026-db.gz">backup_2026-db.gz</a></body></html>`))
+	})
+	mux.HandleFunc("/wp-content/updraft/backup_2026-db.gz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x02})
+	})
 	return mux
 }
 
@@ -178,6 +199,87 @@ func TestWordPressUserEnumeration(t *testing.T) {
 	users := s.enumerateUsernames(context.Background(), baseRoot(srv.URL))
 	if len(users) < 2 {
 		t.Errorf("expected >=2 usernames (admin, editor), got %v", users)
+	}
+}
+
+func TestWordPressConfigExposure(t *testing.T) {
+	srv := httptest.NewServer(fakeWordPress())
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t)
+	addHTTPService(t, db, tid, srv.URL+"/")
+
+	if err := s.RunConfigExposure(context.Background(), tid, noLog); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_config_exposure' AND severity='critical'`, tid).Scan(&n)
+	if n == 0 {
+		t.Error("exposed wp-config.php.bak with DB creds was not reported as critical")
+	}
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_debug_log'`, tid).Scan(&n)
+	if n == 0 {
+		t.Error("exposed debug.log was not reported")
+	}
+}
+
+func TestWordPressConfigNoFalsePositive(t *testing.T) {
+	// A site that 200s an HTML page for a wp-config backup path (SPA catch-all) must
+	// NOT be reported — the body carries no real config source.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<!doctype html><html><body>app shell, mentions DB_PASSWORD in docs</body></html>`))
+	}))
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t)
+	addHTTPService(t, db, tid, srv.URL+"/")
+	// Force a confirmed site row so the module runs even though detection would fail.
+	s.storeSite(context.Background(), tid, wpSite{URL: baseRoot(srv.URL), Host: hostOf(srv.URL), Confidence: ConfEvidence, Signals: []string{"test"}})
+
+	if err := s.RunConfigExposure(context.Background(), tid, noLog); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_config_exposure'`, tid).Scan(&n)
+	if n != 0 {
+		t.Errorf("HTML page mentioning DB_PASSWORD must not be a config leak (got %d)", n)
+	}
+}
+
+func TestWordPressBackupFinder(t *testing.T) {
+	srv := httptest.NewServer(fakeWordPress())
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t)
+	addHTTPService(t, db, tid, srv.URL+"/")
+
+	if err := s.RunBackups(context.Background(), tid, noLog); err != nil {
+		t.Fatal(err)
+	}
+	var dir, arch int
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_backup_directory'`, tid).Scan(&dir)
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_backup_exposure' AND severity='critical'`, tid).Scan(&arch)
+	if dir == 0 {
+		t.Error("browsable UpdraftPlus backup directory was not reported")
+	}
+	if arch == 0 {
+		t.Error("magic-confirmed downloadable gz backup was not reported as critical")
+	}
+}
+
+func TestWPBackupConfirmHelpers(t *testing.T) {
+	// gzip magic confirms.
+	if confirmWPBackupFile("/x/backup.gz", "\x1f\x8bxxxx") == "" {
+		t.Error("gzip backup not confirmed")
+	}
+	// HTML served at a backup path is never a backup.
+	if confirmWPBackupFile("/x/backup.zip", "<!doctype html><html></html>") != "" {
+		t.Error("HTML page falsely confirmed as backup")
+	}
+	// Duplicator installer markers.
+	if wpInstallerKind("<title>Duplicator</title> dup-installer STEP 1 OF 4") == "" {
+		t.Error("duplicator installer not recognized")
+	}
+	if wpInstallerKind("a page that merely mentions duplicator plugin") != "" {
+		t.Error("mere mention of duplicator falsely flagged as installer")
 	}
 }
 

@@ -130,9 +130,11 @@ var moduleRequires = map[string][]string{
 	ModuleBackupDiscovery: capCoreWeb, // backup/config-leak probes on live hosts
 	// WordPress pipeline — each module probes live host roots and self-gates on the
 	// WordPress detection result, so it needs only coreWeb (live http_services).
-	ModuleWPDetect: capCoreWeb,
-	ModuleWPEnum:   capCoreWeb,
-	ModuleWPUsers:  capCoreWeb,
+	ModuleWPDetect:  capCoreWeb,
+	ModuleWPEnum:    capCoreWeb,
+	ModuleWPUsers:   capCoreWeb,
+	ModuleWPConfig:  capCoreWeb,
+	ModuleWPBackups: capCoreWeb,
 	// broken-link hijacking scans DISCOVERED pages' outbound links, so it wants the
 	// full crawl surface (deep pages are where dead external links hide), not just
 	// the host roots.

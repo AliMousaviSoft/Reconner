@@ -78,9 +78,11 @@ const (
 	// verifies which hosts are really WordPress (wp_sites), and every other wp_*
 	// module acts ONLY on those confirmed hosts, so a non-WordPress domain yields
 	// nothing from any of them.
-	ModuleWPDetect = "wp_detect"
-	ModuleWPEnum   = "wp_enum"
-	ModuleWPUsers  = "wp_users"
+	ModuleWPDetect  = "wp_detect"
+	ModuleWPEnum    = "wp_enum"
+	ModuleWPUsers   = "wp_users"
+	ModuleWPConfig  = "wp_config"
+	ModuleWPBackups = "wp_backups"
 	// Network phase IDs are planned through the asset-gated network pipeline and
 	// intentionally stay outside AllModules, whose contract table describes the
 	// web pipeline. Only the four phases admitted by isNetworkModule execute;
@@ -140,6 +142,8 @@ var AllModules = []string{
 	ModuleWPDetect,
 	ModuleWPEnum,
 	ModuleWPUsers,
+	ModuleWPConfig,
+	ModuleWPBackups,
 	ModuleVerify,
 	ModuleMonitor,
 }
@@ -2495,6 +2499,10 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.wpScanner.RunEnumeration(ctx, targetID, logFn)
 	case ModuleWPUsers:
 		return s.wpScanner.RunUsers(ctx, targetID, logFn)
+	case ModuleWPConfig:
+		return s.wpScanner.RunConfigExposure(ctx, targetID, logFn)
+	case ModuleWPBackups:
+		return s.wpScanner.RunBackups(ctx, targetID, logFn)
 	}
 	return fmt.Errorf("%w: %q", ErrInvalidModuleSelection, module)
 }
