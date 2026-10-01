@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/recon-platform/internal/database"
 	"github.com/recon-platform/internal/secret"
 )
 
@@ -49,7 +50,7 @@ func PreflightSessions(ctx context.Context, s *HTTPScanner, targetID string, log
 		status := ValidateSession(ctx, id)
 		// identities.status keeps the raw verdict (authenticated|expired|unknown)
 		// for backward-compatible UI; auth_events carries the richer #45 state model.
-		persistIdentityStatus(ctx, s, id.ID, status)
+		persistIdentityStatus(ctx, s.db, id.ID, status)
 		switch status {
 		case "authenticated":
 			logFn("info", "http_probe", fmt.Sprintf("Identity %q: session is live.", id.Label))
@@ -81,11 +82,11 @@ func PreflightSessions(ctx context.Context, s *HTTPScanner, targetID string, log
 // persistIdentityStatus records the verified status + timestamp so the target UI
 // reflects which sessions are live. The legacy single-blob identity has the
 // synthetic id "legacy" with no row to update — skip it silently.
-func persistIdentityStatus(ctx context.Context, s *HTTPScanner, identityID, status string) {
-	if identityID == "" || identityID == "legacy" {
+func persistIdentityStatus(ctx context.Context, db *database.DB, identityID, status string) {
+	if db == nil || identityID == "" || identityID == "legacy" {
 		return
 	}
-	_, _ = s.db.ExecContext(ctx,
+	_, _ = db.ExecContext(ctx,
 		`UPDATE identities SET status = ?, last_verified_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		status, identityID)
 }
