@@ -76,6 +76,12 @@ func RunMigrations(db *DB) error {
 		alterIdentitiesAddCapturedAt,
 		alterIdentitiesAddVerifiedAt,
 		alterIdentitiesAddExpiresAt,
+		alterIdentitiesAddRefreshStrategy,
+		alterIdentitiesAddRefreshRequest,
+		alterIdentitiesAddCSRFConfig,
+		alterIdentitiesAddLastRefreshed,
+		alterIdentitiesAddRefreshAttempts,
+		createAuthEventsTable,
 		createEvidenceTable,
 		createHTTPInteractionsTable,
 		createObjectsTable,
@@ -664,6 +670,34 @@ const alterIdentitiesAddStatus = `ALTER TABLE identities ADD COLUMN status TEXT 
 const alterIdentitiesAddCapturedAt = `ALTER TABLE identities ADD COLUMN captured_at DATETIME;`
 const alterIdentitiesAddVerifiedAt = `ALTER TABLE identities ADD COLUMN last_verified_at DATETIME;`
 const alterIdentitiesAddExpiresAt = `ALTER TABLE identities ADD COLUMN expires_at DATETIME;`
+
+// Authentication-lifecycle columns (issue #45). refresh_strategy ∈
+// none|replay|manual drives how an expired session is renewed; refresh_request
+// holds an ENCRYPTED raw HTTP request to replay for a 'replay' refresh;
+// csrf_config holds a (non-secret) JSON descriptor of where a CSRF token lives so
+// it can be refreshed; last_refreshed/refresh_attempts are rotation metadata.
+const alterIdentitiesAddRefreshStrategy = `ALTER TABLE identities ADD COLUMN refresh_strategy TEXT DEFAULT 'none';`
+const alterIdentitiesAddRefreshRequest = `ALTER TABLE identities ADD COLUMN refresh_request TEXT DEFAULT '';`
+const alterIdentitiesAddCSRFConfig = `ALTER TABLE identities ADD COLUMN csrf_config TEXT DEFAULT '';`
+const alterIdentitiesAddLastRefreshed = `ALTER TABLE identities ADD COLUMN last_refreshed DATETIME;`
+const alterIdentitiesAddRefreshAttempts = `ALTER TABLE identities ADD COLUMN refresh_attempts INTEGER NOT NULL DEFAULT 0;`
+
+// auth_events is the SANITIZED authentication-lifecycle audit trail (issue #45):
+// one row per create/validate/expire/refresh/revoke transition. It stores WHAT
+// happened and WHY (the detected signal), never secret values — no cookies,
+// tokens, or headers. Used by the dashboard timeline and durable task history.
+const createAuthEventsTable = `
+CREATE TABLE IF NOT EXISTS auth_events (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	identity_id TEXT NOT NULL DEFAULT '',
+	identity_label TEXT NOT NULL DEFAULT '',
+	event TEXT NOT NULL,
+	state TEXT NOT NULL DEFAULT '',
+	detail TEXT NOT NULL DEFAULT '',
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);`
 
 // evidence stores structured, reproducible, REDACTED proof behind a finding —
 // the request/response pairs (per identity for cross-identity findings), the

@@ -41,21 +41,31 @@ func PreflightSessions(ctx context.Context, s *HTTPScanner, targetID string, log
 		if id.ValidationURL == "" && id.Origin == "" {
 			logFn("info", "http_probe", fmt.Sprintf(
 				"Identity %q: no validation endpoint configured — session liveness can't be verified; set a validation URL for reliable authenticated coverage.", id.Label))
+			RecordAuthEvent(ctx, s.db, targetID, id.ID, id.Label, AuthEventNoValidation, SessUnknown,
+				"no validation endpoint configured")
 			continue
 		}
 		validatable++
 		status := ValidateSession(ctx, id)
+		// identities.status keeps the raw verdict (authenticated|expired|unknown)
+		// for backward-compatible UI; auth_events carries the richer #45 state model.
 		persistIdentityStatus(ctx, s, id.ID, status)
 		switch status {
 		case "authenticated":
 			logFn("info", "http_probe", fmt.Sprintf("Identity %q: session is live.", id.Label))
+			RecordAuthEvent(ctx, s.db, targetID, id.ID, id.Label, AuthEventValidated, SessHealthy,
+				"session validated at scan start")
 		case "expired":
 			expired++
 			logFn("warn", "http_probe", fmt.Sprintf(
 				"Identity %q: session is EXPIRED — authenticated modules will scan the logged-out app and miss behind-login vulns. Re-capture this session before trusting the results.", id.Label))
+			RecordAuthEvent(ctx, s.db, targetID, id.ID, id.Label, AuthEventExpired, SessExpired,
+				"session expired, detected at scan-start preflight")
 		default: // unknown
 			logFn("info", "http_probe", fmt.Sprintf(
 				"Identity %q: session status unknown (validation endpoint looks public or unreachable) — proceeding, but coverage behind login isn't guaranteed.", id.Label))
+			RecordAuthEvent(ctx, s.db, targetID, id.ID, id.Label, AuthEventValidated, SessUnknown,
+				"session status indeterminate (validation endpoint public or unreachable)")
 		}
 	}
 
