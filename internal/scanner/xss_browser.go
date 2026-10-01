@@ -1151,6 +1151,66 @@ func (b *browserXSSConfirmer) renderedDOMURLContains(parent context.Context, raw
 	return len(hits) > 0
 }
 
+// renderedDOMHashChangeContains is the hashchange-aware fragment preflight. A sink
+// bound to window.onhashchange / addEventListener('hashchange') does NOT run when a
+// page is opened directly at base#value — the hashchange event only fires on a
+// CHANGE after load. So this loads base with no fragment first, THEN performs a
+// same-document fragment navigation to base#canary, which fires hashchange and lets
+// the sink run. Without this, hash-router DOM XSS is a systematic false negative.
+func (b *browserXSSConfirmer) renderedDOMHashChangeContains(parent context.Context, base, canary string, headers map[string]string) bool {
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
+		return false
+	}
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
+	if !ok {
+		return false
+	}
+	ctx, cancel := b.operationContext(parent, tab, 14*time.Second, lease)
+	defer cancel()
+	removeInstrumentation := installRuntimeDOMInstrumentation(ctx, tab, canary)
+	defer removeInstrumentation()
+	full := base + "#" + canary
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{base, full}, headers)
+	defer stopHeaders()
+	actions := append(headerActions,
+		chromedp.Navigate(base), chromedp.Sleep(500*time.Millisecond),
+		chromedp.Navigate(full), chromedp.Sleep(800*time.Millisecond),
+		chromedp.Evaluate(`void 0`, nil))
+	_ = chromedp.Run(ctx, actions...)
+	return len(readRuntimeDOMHits(ctx)) > 0
+}
+
+// fireHashChange proves hash DOM XSS for a hashchange-driven sink: it loads base
+// with no fragment, then performs a same-document fragment navigation to
+// base#payload so window.onhashchange fires and the sink executes. This is the
+// faithful reproduction of an attacker link clicked from the same page, and the
+// counterpart to fireWithHeaders (which only covers a fragment read at load time).
+func (b *browserXSSConfirmer) fireHashChange(parent context.Context, base, payload string, headers map[string]string, nonce string) bool {
+	gate, lease, acquired := b.acquireNavigation(parent)
+	if !acquired {
+		return false
+	}
+	defer b.releaseNavigation(gate, lease)
+	tab, ok := b.ensureTab(lease)
+	if !ok {
+		return false
+	}
+	ctx, cancel := b.operationContext(parent, tab, 14*time.Second, lease)
+	defer cancel()
+	removeProofObserver := installXSSProofObserver(ctx, tab, nonce)
+	defer removeProofObserver()
+	full := base + "#" + payload
+	headerActions, stopHeaders := scopedBrowserHeaderSession(ctx, tab, parent, []string{base, full}, headers)
+	defer stopHeaders()
+	actions := append(headerActions,
+		chromedp.Navigate(base), chromedp.Sleep(400*time.Millisecond),
+		chromedp.Navigate(full))
+	_ = chromedp.Run(ctx, actions...)
+	return strings.TrimSpace(b.waitForExecution(ctx, nonce)) == nonce
+}
+
 // DOMSourceReflects is the source-mode preflight used by the broad DOM-XSS pass.
 // A harmless canary costs one navigation for query/path sources and at most four
 // fragment shapes for hash routers; only a rendered reflection pays for the full
@@ -1184,6 +1244,13 @@ func (b *browserXSSConfirmer) DOMSourceReflects(parent context.Context, pageURL,
 				storeDOMReflection(key, true)
 				return true
 			}
+		}
+		// Load-time reads showed nothing — try the hashchange path, which covers a
+		// sink bound to window.onhashchange (a very common hash-router shape that a
+		// direct base#value navigation never triggers).
+		if b.renderedDOMHashChangeContains(parent, base, canary, auth) {
+			storeDOMReflection(key, true)
+			return true
 		}
 		storeDOMReflection(key, false)
 		return false
@@ -1230,6 +1297,12 @@ func (b *browserXSSConfirmer) ConfirmDOMSource(parent context.Context, pageURL, 
 					fired = true
 					break
 				}
+			}
+			// Also fire via a same-document fragment navigation so a sink bound to
+			// window.onhashchange (which a direct base#payload load never triggers)
+			// is covered too.
+			if !fired && b.fireHashChange(parent, base, pl, auth, nonce) {
+				fired = true
 			}
 		case "query":
 			if param == "" {

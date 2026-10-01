@@ -32,6 +32,10 @@ func TestBrowserDOMSourceModesLive(t *testing.T) {
 	}
 	mux.HandleFunc("/hash", page(`app.innerHTML=decodeURIComponent(location.hash.slice(1))`))
 	mux.HandleFunc("/hash-param", page(`app.innerHTML=new URLSearchParams(location.hash.slice(1)).get('html')`))
+	// Sink bound ONLY to hashchange (never read at load) — the classic hash-router
+	// shape a direct base#payload navigation never triggers. Regression guard for
+	// the fireHashChange / renderedDOMHashChangeContains two-navigation path.
+	mux.HandleFunc("/hashchange", page(`addEventListener('hashchange',function(){app.innerHTML=decodeURIComponent(location.hash.slice(1))})`))
 	mux.HandleFunc("/name", page(`app.innerHTML=window.name`))
 	mux.HandleFunc("/message", page(`addEventListener('message',e=>app.innerHTML=e.data)`))
 	mux.HandleFunc("/frame", page(`app.innerHTML='<iframe srcdoc="'+new URLSearchParams(location.search).get('html')+'"></iframe>'`))
@@ -59,6 +63,7 @@ func TestBrowserDOMSourceModesLive(t *testing.T) {
 		name, path, mode, param string
 	}{
 		{"raw hash", "/hash", "hash", ""},
+		{"hashchange sink", "/hashchange", "hash", ""},
 		{"hash parameter", "/hash-param", "hash", "html"},
 		{"window.name", "/name", "window.name", ""},
 		{"postMessage", "/message", "postMessage", ""},
