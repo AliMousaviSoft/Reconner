@@ -77,6 +77,10 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: 1
+          # Ignore ONLY the deliberately-bundled Chromium package family (see the
+          # policy's own comment). Every other package, plus the secret and
+          # misconfig scanners, stays fully enforced.
+          ignore-policy: .trivy/ignore-policy.rego
 
   push-platform:
     if: github.event_name != 'pull_request'
