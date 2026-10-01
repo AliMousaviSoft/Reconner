@@ -78,9 +78,9 @@ const (
 	// verifies which hosts are really WordPress (wp_sites), and every other wp_*
 	// module acts ONLY on those confirmed hosts, so a non-WordPress domain yields
 	// nothing from any of them.
-	ModuleWPDetect  = "wp_detect"
-	ModuleWPEnum    = "wp_enum"
-	ModuleWPUsers   = "wp_users"
+	ModuleWPDetect    = "wp_detect"
+	ModuleWPEnum      = "wp_enum"
+	ModuleWPUsers     = "wp_users"
 	ModuleWPConfig    = "wp_config"
 	ModuleWPBackups   = "wp_backups"
 	ModuleWPEndpoints = "wp_endpoints"
