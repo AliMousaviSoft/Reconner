@@ -1,0 +1,27 @@
+id: reconner-laravel-log-exposed
+info:
+  name: Laravel application log exposed
+  author: reconner
+  severity: medium
+  description: A public storage/logs/laravel.log leaks stack traces, SQL, environment values and user data written by the framework's error handler.
+  tags: reconner,exposure,laravel,log
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/storage/logs/laravel.log"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "production.ERROR"
+          - "stacktrace"
+        condition: and
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

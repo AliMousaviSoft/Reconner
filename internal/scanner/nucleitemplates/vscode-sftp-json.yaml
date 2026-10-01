@@ -1,0 +1,30 @@
+id: reconner-vscode-sftp-json
+info:
+  name: VS Code sftp.json with credentials exposed
+  author: reconner
+  severity: high
+  description: A committed .vscode/sftp.json stores the deploy host, username and (often) plaintext password/private key for the production server.
+  tags: reconner,exposure,vscode,sftp,credentials
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.vscode/sftp.json"
+      - "{{BaseURL}}/sftp.json"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "\"host\""
+          - "\"username\""
+          - "\"remotePath\""
+        condition: and
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

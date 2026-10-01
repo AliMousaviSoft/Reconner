@@ -1,0 +1,29 @@
+id: reconner-private-key-exposed
+info:
+  name: Private key file exposed
+  author: reconner
+  severity: high
+  description: A served private key (RSA/OpenSSH/EC/DSA/PGP) grants an attacker the server's identity for SSH, TLS or code signing.
+  tags: reconner,exposure,privatekey,credentials
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/id_rsa"
+      - "{{BaseURL}}/.ssh/id_rsa"
+      - "{{BaseURL}}/server.key"
+      - "{{BaseURL}}/private.key"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "-----BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY-----"
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

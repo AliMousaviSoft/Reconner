@@ -1,0 +1,24 @@
+id: reconner-adminer-exposed
+info:
+  name: Adminer database console exposed
+  author: reconner
+  severity: medium
+  description: A reachable Adminer login fronts the database directly and is a frequent brute-force / known-CVE target.
+  tags: reconner,exposure,adminer,database,panel
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/adminer.php"
+      - "{{BaseURL}}/adminer/"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Adminer"
+          - "login-password"
+        condition: and
+      - type: status
+        status:
+          - 200

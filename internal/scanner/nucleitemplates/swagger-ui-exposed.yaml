@@ -1,0 +1,25 @@
+id: reconner-swagger-ui-exposed
+info:
+  name: Swagger / OpenAPI UI exposed
+  author: reconner
+  severity: medium
+  description: A reachable Swagger UI publishes the full API contract (routes, params, auth schemes) — the attack-surface map an attacker needs to target the API.
+  tags: reconner,exposure,swagger,openapi,api
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/swagger-ui/index.html"
+      - "{{BaseURL}}/swagger/index.html"
+      - "{{BaseURL}}/api/swagger-ui.html"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Swagger UI"
+          - "swagger-ui"
+        condition: and
+      - type: status
+        status:
+          - 200

@@ -1,0 +1,22 @@
+id: reconner-web-config-connstrings
+info:
+  name: ASP.NET web.config with connection strings exposed
+  author: reconner
+  severity: high
+  description: A served web.config exposing <connectionStrings> leaks database host and credentials and often machine keys used to forge auth/viewstate.
+  tags: reconner,exposure,aspnet,webconfig,credentials
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/web.config"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "<connectionStrings>"
+          - "connectionString="
+        condition: and
+      - type: status
+        status:
+          - 200

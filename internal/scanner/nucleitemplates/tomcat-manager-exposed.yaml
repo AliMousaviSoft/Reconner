@@ -1,0 +1,22 @@
+id: reconner-tomcat-manager-exposed
+info:
+  name: Apache Tomcat Manager reachable without auth
+  author: reconner
+  severity: high
+  description: An unauthenticated Tomcat Manager allows deploying a WAR — a direct path to remote code execution on the server.
+  tags: reconner,exposure,tomcat,manager,rce
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/manager/html"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Tomcat Web Application Manager"
+          - "Server Information"
+        condition: and
+      - type: status
+        status:
+          - 200

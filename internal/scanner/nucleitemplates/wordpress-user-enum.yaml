@@ -1,0 +1,29 @@
+id: reconner-wordpress-user-enum
+info:
+  name: WordPress REST user enumeration
+  author: reconner
+  severity: medium
+  description: The public wp/v2/users REST route discloses valid usernames/slugs, removing the username-guessing half of a credential attack against wp-login.
+  tags: reconner,exposure,wordpress,enumeration,rest
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-json/wp/v2/users"
+      - "{{BaseURL}}/?rest_route=/wp/v2/users"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "\"slug\""
+          - "\"id\""
+          - "\"name\""
+        condition: and
+      - type: word
+        part: header
+        words:
+          - "application/json"
+      - type: status
+        status:
+          - 200
