@@ -1,0 +1,28 @@
+id: reconner-django-debug-mode
+info:
+  name: Django DEBUG=True traceback exposed
+  author: reconner
+  severity: high
+  description: An error page rendered with Django DEBUG=True leaks the settings module, installed apps, environment variables, and a full stack trace — a direct disclosure of server internals and often secrets.
+  tags: reconner,exposure,django,debug,misconfig
+  reference:
+    - https://docs.djangoproject.com/en/stable/ref/settings/#debug
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+      - "{{BaseURL}}/%2e%2e"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Traceback (most recent call last)"
+          - "You're seeing this error because you have"
+          - "DEBUG = True"
+        condition: and
+      - type: word
+        part: body
+        words:
+          - "Django Version"

@@ -1,0 +1,23 @@
+id: reconner-prometheus-metrics-exposed
+info:
+  name: Prometheus metrics endpoint exposed
+  author: reconner
+  severity: medium
+  description: A public /metrics endpoint leaks internal hostnames, build info, route names and request volumes that help an attacker profile the backend.
+  tags: reconner,exposure,prometheus,metrics,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/metrics"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "# HELP "
+          - "# TYPE "
+          - "go_gc_duration_seconds"
+        condition: and
+      - type: status
+        status:
+          - 200

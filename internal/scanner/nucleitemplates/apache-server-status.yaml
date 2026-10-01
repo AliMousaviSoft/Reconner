@@ -1,0 +1,24 @@
+id: reconner-apache-server-status
+info:
+  name: Apache mod_status (server-status) exposed
+  author: reconner
+  severity: medium
+  description: A publicly reachable /server-status page discloses live request URLs, client IPs, and vhost internals an attacker can use to map the application and harvest in-flight sensitive paths.
+  tags: reconner,exposure,apache,server-status,misconfig
+  reference:
+    - https://httpd.apache.org/docs/current/mod/mod_status.html
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/server-status"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Apache Server Status"
+          - "Server Version"
+        condition: and
+      - type: status
+        status:
+          - 200

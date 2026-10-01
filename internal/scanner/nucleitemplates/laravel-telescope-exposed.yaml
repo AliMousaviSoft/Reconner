@@ -1,0 +1,22 @@
+id: reconner-laravel-telescope-exposed
+info:
+  name: Laravel Telescope exposed
+  author: reconner
+  severity: high
+  description: An unauthenticated Telescope dashboard exposes requests, queries, mail, cache keys and session data captured from live traffic — a direct window into sensitive runtime data.
+  tags: reconner,exposure,laravel,telescope,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/telescope/requests"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Telescope"
+          - "window.Telescope"
+        condition: and
+      - type: status
+        status:
+          - 200

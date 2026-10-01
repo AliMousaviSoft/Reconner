@@ -1,0 +1,26 @@
+id: reconner-docker-registry-catalog
+info:
+  name: Docker Registry catalog exposed
+  author: reconner
+  severity: high
+  description: An unauthenticated Docker Registry v2 /_catalog lists every published repository; images can then be pulled and inspected for source, secrets and deploy credentials.
+  tags: reconner,exposure,docker,registry,misconfig
+  reference:
+    - https://docs.docker.com/registry/spec/api/
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/v2/_catalog"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "\"repositories\""
+      - type: word
+        part: header
+        words:
+          - "application/json"
+      - type: status
+        status:
+          - 200

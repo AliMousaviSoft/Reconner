@@ -1,0 +1,26 @@
+id: reconner-elasticsearch-exposed
+info:
+  name: Elasticsearch instance exposed without authentication
+  author: reconner
+  severity: high
+  description: An unauthenticated Elasticsearch root returns its cluster banner; the full index data and _cat APIs are then reachable, a frequent source of mass data exposure.
+  tags: reconner,exposure,elasticsearch,database,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "\"cluster_name\""
+          - "\"You Know, for Search\""
+        condition: and
+      - type: word
+        part: header
+        words:
+          - "application/json"
+      - type: status
+        status:
+          - 200

@@ -1,0 +1,26 @@
+id: reconner-ds-store-exposed
+info:
+  name: macOS .DS_Store directory index exposed
+  author: reconner
+  severity: medium
+  description: A served .DS_Store reveals the directory's real filenames (backups, source, admin paths) that are otherwise unlinked — a reliable map of hidden content.
+  tags: reconner,exposure,dsstore,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.DS_Store"
+    matchers-condition: and
+    matchers:
+      # .DS_Store header: 4-byte alignment (00 00 00 01) followed by the "Bud1"
+      # magic — a precise binary signature, not an incidental keyword.
+      - type: binary
+        binary:
+          - "0000000142756431"
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true

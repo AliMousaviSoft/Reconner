@@ -1,0 +1,24 @@
+id: reconner-kibana-exposed
+info:
+  name: Kibana dashboard exposed
+  author: reconner
+  severity: medium
+  description: A reachable Kibana instance fronts the Elasticsearch data store and frequently allows unauthenticated browsing of indexed logs and documents.
+  tags: reconner,exposure,kibana,elastic,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/app/kibana"
+      - "{{BaseURL}}/api/status"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "kbn-"
+          - "kibana"
+        condition: and
+      - type: status
+        status:
+          - 200

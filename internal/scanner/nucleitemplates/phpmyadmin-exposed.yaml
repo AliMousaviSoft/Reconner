@@ -1,0 +1,24 @@
+id: reconner-phpmyadmin-exposed
+info:
+  name: phpMyAdmin login panel exposed
+  author: reconner
+  severity: medium
+  description: A reachable phpMyAdmin panel is a high-value brute-force / known-CVE target that fronts the application database directly.
+  tags: reconner,exposure,phpmyadmin,panel,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/phpmyadmin/"
+      - "{{BaseURL}}/pma/"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "phpMyAdmin"
+          - "pma_username"
+        condition: and
+      - type: status
+        status:
+          - 200

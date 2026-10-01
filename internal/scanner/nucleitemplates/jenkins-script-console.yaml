@@ -1,0 +1,26 @@
+id: reconner-jenkins-script-console
+info:
+  name: Jenkins Groovy script console accessible
+  author: reconner
+  severity: critical
+  description: An unauthenticated Jenkins /script Groovy console is direct remote code execution on the CI server. Confirmed only by the console UI rendering without a login redirect.
+  tags: reconner,exposure,jenkins,rce,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/script"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Script Console"
+          - "Groovy"
+        condition: and
+      - type: word
+        part: header
+        words:
+          - "X-Jenkins"
+      - type: status
+        status:
+          - 200

@@ -1,0 +1,27 @@
+id: reconner-wordpress-debug-log
+info:
+  name: WordPress debug.log exposed
+  author: reconner
+  severity: medium
+  description: A public wp-content/debug.log leaks server paths, plugin errors and sometimes credentials or tokens written by faulty plugins.
+  tags: reconner,exposure,wordpress,debug,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/debug.log"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "PHP "
+          - "/wp-content/"
+        condition: and
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "text/html"
+        negative: true
