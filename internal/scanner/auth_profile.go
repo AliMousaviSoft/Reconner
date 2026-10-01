@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/recon-platform/internal/database"
+	"github.com/recon-platform/internal/secret"
 )
 
 // Authentication-lifecycle state model (issue #45). A session is never judged
@@ -62,6 +63,48 @@ func RecordAuthEvent(ctx context.Context, db *database.DB, targetID, identityID,
 		INSERT INTO auth_events (id, target_id, identity_id, identity_label, event, state, detail)
 		VALUES (?,?,?,?,?,?,?)`,
 		uuid.NewString(), targetID, identityID, label, event, state, sanitizeAuthDetail(detail))
+}
+
+// AuthGate is the reusable fail-closed check an authenticated-only module runs
+// before testing: it validates the baseline identity's session and, if expired,
+// attempts a refresh, so a module never silently scans a logged-out app behind a
+// dead credential (issue #45).
+//
+// Returns:
+//   - configured=false  → no identity is set; an unauthenticated scan is
+//     legitimate, so ready=true and the module runs as normal.
+//   - configured=true, ready=true  → the session is healthy (or indeterminate
+//     because no validation endpoint is set — we cannot prove it dead, so we do
+//     not block).
+//   - configured=true, ready=false → a configured session is proven unusable
+//     (expired and un-refreshable); an auth-only module should transition to an
+//     explicit blocked state instead of running. `state` says which failure.
+func AuthGate(ctx context.Context, db *database.DB, box *secret.Box, targetID string) (ready, configured bool, state string) {
+	ids := LoadIdentities(ctx, db, targetID, box)
+	if len(ids) == 0 {
+		return true, false, ""
+	}
+	id, ok := baselineIdentity(ids)
+	if !ok {
+		return true, false, ""
+	}
+	if id.ValidationURL == "" && id.Origin == "" {
+		return true, true, SessUnknown // cannot prove dead → don't block
+	}
+	switch ValidateSession(ctx, id) {
+	case "authenticated":
+		return true, true, SessHealthy
+	case "unknown":
+		return true, true, SessUnknown
+	default: // expired — try to self-heal
+		if st, refreshed := RefreshSession(ctx, db, box, targetID, id); refreshed {
+			return true, true, st
+		} else {
+			RecordAuthEvent(ctx, db, targetID, id.ID, id.Label, AuthEventBlocked, SessBlocked,
+				"authenticated module gated: session expired and could not be refreshed")
+			return false, true, st
+		}
+	}
 }
 
 // sessionStateFromValidation maps the ValidateSession verdict

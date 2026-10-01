@@ -57,11 +57,24 @@ func PreflightSessions(ctx context.Context, s *HTTPScanner, targetID string, log
 			RecordAuthEvent(ctx, s.db, targetID, id.ID, id.Label, AuthEventValidated, SessHealthy,
 				"session validated at scan start")
 		case "expired":
-			expired++
-			logFn("warn", "http_probe", fmt.Sprintf(
-				"Identity %q: session is EXPIRED — authenticated modules will scan the logged-out app and miss behind-login vulns. Re-capture this session before trusting the results.", id.Label))
 			RecordAuthEvent(ctx, s.db, targetID, id.ID, id.Label, AuthEventExpired, SessExpired,
 				"session expired, detected at scan-start preflight")
+			// Self-heal: if a refresh strategy is configured, try to restore the
+			// session now before declaring it dead — detect → refresh → resume.
+			if state, ok := RefreshSession(ctx, s.db, secret.New(s.cfg.SessionSecret), targetID, id); ok {
+				logFn("info", "http_probe", fmt.Sprintf(
+					"Identity %q: session was expired but was REFRESHED successfully — authenticated coverage restored.", id.Label))
+				persistIdentityStatus(ctx, s.db, id.ID, "authenticated")
+				continue
+			} else if state == SessRefreshRequired {
+				expired++
+				logFn("warn", "http_probe", fmt.Sprintf(
+					"Identity %q: session EXPIRED and needs manual re-authentication (no automatic refresh) — re-import it; authenticated findings will be incomplete until then.", id.Label))
+			} else {
+				expired++
+				logFn("warn", "http_probe", fmt.Sprintf(
+					"Identity %q: session is EXPIRED and could not be refreshed — authenticated modules will scan the logged-out app and miss behind-login vulns. Re-capture this session before trusting the results.", id.Label))
+			}
 		default: // unknown
 			logFn("info", "http_probe", fmt.Sprintf(
 				"Identity %q: session status unknown (validation endpoint looks public or unreachable) — proceeding, but coverage behind login isn't guaranteed.", id.Label))
