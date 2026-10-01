@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react'
 import { targets as targetsApi } from '../../lib/api'
 import { useUIStore } from '../../store/ui'
 
-type Ident = { id: string; label: string; role: string; is_baseline: boolean; status: string; auth_method: string; last_verified_at: string }
+type Ident = { id: string; label: string; role: string; is_baseline: boolean; status: string; auth_method: string; last_verified_at: string; expires_at: string; last_refreshed: string; refresh_strategy: string; refresh_attempts: number; has_validation: boolean }
+type AuthEvent = { identity_label: string; event: string; state: string; detail: string; created_at: string }
 
 const STATUS_STYLE: Record<string, string> = {
   authenticated: 'badge-low',
   expired: 'badge-medium',
   unauthenticated: 'badge-critical',
+  revoked: 'badge-critical',
   unknown: 'badge-neutral',
 }
 
@@ -34,10 +36,13 @@ export const IdentitiesPanel = ({ targetId }: { targetId: string }) => {
   const [saving, setSaving] = useState(false)
   const [importing, setImporting] = useState(false)
   const [verifying, setVerifying] = useState('')
+  const [refreshing, setRefreshing] = useState('')
+  const [events, setEvents] = useState<AuthEvent[]>([])
   const { addToast } = useUIStore()
 
   const load = () => targetsApi.identities(targetId).then(setList).catch(() => setList([]))
-  useEffect(() => { load() }, [targetId])
+  const loadEvents = () => targetsApi.authEvents(targetId).then(setEvents).catch(() => setEvents([]))
+  useEffect(() => { load(); loadEvents() }, [targetId])
 
   const add = async () => {
     const headers = headersFrom(cookie, bearer)
@@ -74,9 +79,28 @@ export const IdentitiesPanel = ({ targetId }: { targetId: string }) => {
     try {
       const r = await targetsApi.validateIdentity(targetId, iid)
       addToast(r.status === 'authenticated' ? 'success' : 'warning', `Session: ${r.status}`)
-      load()
+      load(); loadEvents()
     } catch (e) { addToast('error', e instanceof Error ? e.message : 'Verify failed') }
     finally { setVerifying('') }
+  }
+
+  const refresh = async (iid: string) => {
+    setRefreshing(iid)
+    try {
+      const r = await targetsApi.refreshIdentity(targetId, iid)
+      addToast(r.refreshed ? 'success' : 'warning', r.refreshed ? 'Session refreshed' : `Refresh: ${r.state}`)
+      load(); loadEvents()
+    } catch (e) { addToast('error', e instanceof Error ? e.message : 'Refresh failed') }
+    finally { setRefreshing('') }
+  }
+
+  const revoke = async (iid: string) => {
+    if (!confirm('Revoke this profile? Its stored credentials will be wiped immediately.')) return
+    try {
+      await targetsApi.revokeIdentity(targetId, iid)
+      addToast('success', 'Profile revoked — credentials wiped')
+      load(); loadEvents()
+    } catch (e) { addToast('error', e instanceof Error ? e.message : 'Revoke failed') }
   }
 
   return (
@@ -94,13 +118,25 @@ export const IdentitiesPanel = ({ targetId }: { targetId: string }) => {
         {list.length > 0 && (
           <ul className="space-y-1">
             {list.map(i => (
-              <li key={i.id} className="flex items-center gap-2 text-xs bg-white/[.03] rounded-lg px-2.5 py-1.5">
+              <li key={i.id} className="flex flex-wrap items-center gap-2 text-xs bg-white/[.03] rounded-lg px-2.5 py-1.5">
                 <span className="font-medium">{i.label}</span>
                 {i.is_baseline && <span className="badge-info">baseline / owner</span>}
                 <span className={STATUS_STYLE[i.status] || 'badge-neutral'}>{i.status || 'unknown'}</span>
-                <button onClick={() => verify(i.id)} disabled={verifying === i.id}
-                  className="ml-auto text-accent-hover hover:underline">{verifying === i.id ? '…' : 'Verify'}</button>
-                <button onClick={() => del(i.id)} className="text-text-muted hover:text-severity-critical">✕</button>
+                {i.refresh_strategy && i.refresh_strategy !== 'none' && <span className="badge-neutral" title="refresh strategy">↻ {i.refresh_strategy}</span>}
+                {i.expires_at && <span className="text-text-muted" title="expires">exp {i.expires_at.slice(0, 16).replace('T', ' ')}</span>}
+                {i.last_verified_at && <span className="text-text-muted" title="last validated">✓ {i.last_verified_at.slice(0, 16).replace('T', ' ')}</span>}
+                <span className="ml-auto flex items-center gap-2">
+                  <button onClick={() => verify(i.id)} disabled={verifying === i.id}
+                    className="text-accent-hover hover:underline">{verifying === i.id ? '…' : 'Validate'}</button>
+                  {i.refresh_strategy && i.refresh_strategy !== 'none' && i.status !== 'revoked' && (
+                    <button onClick={() => refresh(i.id)} disabled={refreshing === i.id}
+                      className="text-accent-hover hover:underline">{refreshing === i.id ? '…' : 'Refresh'}</button>
+                  )}
+                  {i.status !== 'revoked' && (
+                    <button onClick={() => revoke(i.id)} className="text-text-muted hover:text-severity-high">Revoke</button>
+                  )}
+                  <button onClick={() => del(i.id)} className="text-text-muted hover:text-severity-critical" title="delete">✕</button>
+                </span>
               </li>
             ))}
           </ul>
@@ -144,6 +180,23 @@ export const IdentitiesPanel = ({ targetId }: { targetId: string }) => {
             {importing ? 'Importing…' : 'Import browser session'}
           </button>
         </div>
+
+        {/* Authentication-lifecycle timeline (sanitized — never shows secrets). */}
+        {events.length > 0 && (
+          <div className="border-t border-white/[.06] pt-3">
+            <p className="text-xs font-medium mb-1.5">Authentication timeline</p>
+            <ul className="space-y-1 max-h-48 overflow-auto">
+              {events.map((e, idx) => (
+                <li key={idx} className="flex items-start gap-2 text-[11px] text-text-muted">
+                  <span className="tabular-nums shrink-0">{e.created_at.slice(0, 19).replace('T', ' ')}</span>
+                  <span className="font-medium text-text-secondary shrink-0">{e.identity_label || '—'}</span>
+                  <span className={STATUS_STYLE[e.state] || 'badge-neutral'}>{e.event}</span>
+                  {e.detail && <span className="truncate">{e.detail}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </details>
   )

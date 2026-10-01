@@ -112,11 +112,14 @@ export const targets = {
   resumeScan: (id: string) => req<void>(`/targets/${id}/resume`, { method: 'POST' }),
   skipPhase: (id: string) => req<void>(`/targets/${id}/skip-phase`, { method: 'POST' }),
   cancelScan: (id: string) => req<void>(`/targets/${id}/cancel`, { method: 'POST' }),
-  identities: (id: string) => req<{ id: string; label: string; role: string; is_baseline: boolean; status: string; auth_method: string; last_verified_at: string }[]>(`/targets/${id}/identities`),
+  identities: (id: string) => req<{ id: string; label: string; role: string; is_baseline: boolean; status: string; auth_method: string; last_verified_at: string; expires_at: string; last_refreshed: string; refresh_strategy: string; refresh_attempts: number; has_validation: boolean }[]>(`/targets/${id}/identities`),
   addIdentity: (id: string, body: { label: string; role?: string; headers: Record<string,string>; is_baseline: boolean; validation_url?: string; validation_signal?: string; origin?: string }) =>
     req<{ id: string }>(`/targets/${id}/identities`, { method: 'POST', body: JSON.stringify(body) }),
   delIdentity: (id: string, iid: string) => req<void>(`/targets/${id}/identities/${iid}`, { method: 'DELETE' }),
   validateIdentity: (id: string, iid: string) => req<{ status: string }>(`/targets/${id}/identities/${iid}/validate`, { method: 'POST' }),
+  refreshIdentity: (id: string, iid: string) => req<{ state: string; refreshed: boolean }>(`/targets/${id}/identities/${iid}/refresh`, { method: 'POST' }),
+  revokeIdentity: (id: string, iid: string) => req<{ status: string }>(`/targets/${id}/identities/${iid}/revoke`, { method: 'POST' }),
+  authEvents: (id: string) => req<{ identity_label: string; event: string; state: string; detail: string; created_at: string }[]>(`/targets/${id}/auth-events`),
   evidence: (id: string, fid: string) => req<{ identity_label: string; request: string; response: string; comparison: string; note: string }[]>(`/targets/${id}/findings/${fid}/evidence`),
   replay: (id: string, body: { method?: string; url: string; body?: string; content_type?: string; identity_id?: string }) =>
     req<{ results: { identity_label: string; status: number; content_type: string; length: number; body: string; verdict: string; timing_ms: number }[]; comparison?: string }>(`/targets/${id}/replay`, { method: 'POST', body: JSON.stringify(body) }),
