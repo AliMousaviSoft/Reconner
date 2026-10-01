@@ -107,6 +107,36 @@ func wpGet(ctx context.Context, rawURL string, maxBody int64) wpResp {
 	}
 }
 
+// wpPost performs one POST with the shared WP client (for XML-RPC and login
+// probes) and returns a bounded response.
+func wpPost(ctx context.Context, rawURL, contentType, body string, maxBody int64) wpResp {
+	rctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, rawURL, strings.NewReader(body))
+	if err != nil {
+		return wpResp{}
+	}
+	req.Header.Set("User-Agent", wpUserAgent)
+	req.Header.Set("Content-Type", contentType)
+	resp, err := wpHTTPClient.Do(req)
+	if err != nil {
+		return wpResp{}
+	}
+	defer resp.Body.Close()
+	if maxBody <= 0 {
+		maxBody = 128 * 1024
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	return wpResp{
+		status:    resp.StatusCode,
+		body:      string(b),
+		location:  resp.Header.Get("Location"),
+		setCookie: strings.Join(resp.Header.Values("Set-Cookie"), "; "),
+		linkHdr:   strings.Join(resp.Header.Values("Link"), ", "),
+		ctype:     resp.Header.Get("Content-Type"),
+	}
+}
+
 var (
 	// meta generator: <meta name="generator" content="WordPress 6.4.2" />
 	wpGeneratorRe = regexp.MustCompile(`(?i)<meta[^>]+name=["']generator["'][^>]+content=["']WordPress\s*([0-9][0-9.]*)?`)

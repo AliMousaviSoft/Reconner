@@ -2,9 +2,11 @@ package scanner
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -82,6 +84,44 @@ func fakeWordPress() http.Handler {
 	mux.HandleFunc("/wp-content/updraft/backup_2026-db.gz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write([]byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x02})
+	})
+	// XML-RPC: listMethods advertises the dangerous methods; wp.getUsersBlogs
+	// accepts admin/admin (a weak credential) and faults otherwise.
+	mux.HandleFunc("/xmlrpc.php", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body := string(b)
+		w.Header().Set("Content-Type", "text/xml")
+		switch {
+		case strings.Contains(body, "system.listMethods"):
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><params><param><value><array><data>
+<value><string>system.multicall</string></value>
+<value><string>pingback.ping</string></value>
+<value><string>wp.getUsersBlogs</string></value>
+</data></array></value></param></params></methodResponse>`))
+		case strings.Contains(body, "wp.getUsersBlogs"):
+			if strings.Contains(body, "<string>admin</string>") && strings.Contains(body, "<string>admin</string>") &&
+				strings.Count(body, "<string>admin</string>") >= 2 {
+				_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><params><param><value><array><data>
+<value><struct><member><name>isAdmin</name><value><boolean>1</boolean></value></member>
+<member><name>blogName</name><value><string>Ex</string></value></member></struct></value>
+</data></array></value></param></params></methodResponse>`))
+				return
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><fault><value><struct>
+<member><name>faultCode</name><value><int>403</int></value></member>
+<member><name>faultString</name><value><string>Incorrect username or password.</string></value></member>
+</struct></value></fault></methodResponse>`))
+		default:
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><params></params></methodResponse>`))
+		}
+	})
+	// Installer left in the "not installed" state → reinstall takeover.
+	mux.HandleFunc("/wp-admin/install.php", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><body><h1>Welcome</h1>
+<form><input name="weblog_title"><input name="admin_email"><input name="admin_password"></form>
+famous five-minute WordPress installation</body></html>`))
 	})
 	return mux
 }
@@ -280,6 +320,92 @@ func TestWPBackupConfirmHelpers(t *testing.T) {
 	}
 	if wpInstallerKind("a page that merely mentions duplicator plugin") != "" {
 		t.Error("mere mention of duplicator falsely flagged as installer")
+	}
+}
+
+func TestWordPressEndpointsXMLRPC(t *testing.T) {
+	srv := httptest.NewServer(fakeWordPress())
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t)
+	addHTTPService(t, db, tid, srv.URL+"/")
+
+	if err := s.RunEndpoints(context.Background(), tid, noLog); err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range []string{"wordpress_xmlrpc_enabled", "wordpress_xmlrpc_pingback", "wordpress_xmlrpc_multicall", "wordpress_login_panel"} {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type=?`, tid, typ).Scan(&n)
+		if n == 0 {
+			t.Errorf("endpoint finding %q missing", typ)
+		}
+	}
+}
+
+func TestWordPressMisconfigInstall(t *testing.T) {
+	srv := httptest.NewServer(fakeWordPress())
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t)
+	addHTTPService(t, db, tid, srv.URL+"/")
+
+	if err := s.RunMisconfig(context.Background(), tid, noLog); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_install_exposed' AND severity='critical'`, tid).Scan(&n)
+	if n == 0 {
+		t.Error("reinstallable site (install.php wizard) was not flagged critical")
+	}
+}
+
+func TestWordPressCredAuditGate(t *testing.T) {
+	srv := httptest.NewServer(fakeWordPress())
+	defer srv.Close()
+
+	// (1) Unauthorized: must do NO active testing → no credential finding.
+	s1, db1, tid1 := newWPTestScanner(t)
+	addHTTPService(t, db1, tid1, srv.URL+"/")
+	if err := s1.RunCredAudit(context.Background(), tid1, noLog); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db1.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_weak_credentials'`, tid1).Scan(&n)
+	if n != 0 {
+		t.Fatal("credential audit must not run active testing without authorization")
+	}
+
+	// (2) Authorized: admin/admin is accepted by the fake → one critical finding.
+	db2, err := database.New(filepath.Join(t.TempDir(), "wp2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	if err := database.RunMigrations(db2); err != nil {
+		t.Fatal(err)
+	}
+	tid2 := uuid.NewString()
+	if _, err := db2.Exec(`INSERT INTO targets (id, domain) VALUES (?, 'ex.test')`, tid2); err != nil {
+		t.Fatal(err)
+	}
+	addHTTPService(t, db2, tid2, srv.URL+"/")
+	s2 := NewWordPressScanner(db2, &config.Config{EnableWPCredentialAudit: true}, logger.New("error"), nil)
+	if err := s2.RunCredAudit(context.Background(), tid2, noLog); err != nil {
+		t.Fatal(err)
+	}
+	db2.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_weak_credentials' AND severity='critical'`, tid2).Scan(&n)
+	if n == 0 {
+		t.Error("authorized credential audit did not confirm the weak admin/admin credential")
+	}
+}
+
+func TestWPCredHelpers(t *testing.T) {
+	if maskSecret("password") != "p*******" {
+		t.Errorf("maskSecret = %q", maskSecret("password"))
+	}
+	if !strings.Contains(xmlrpcGetUsersBlogs("a&b", "c<d"), "a&amp;b") {
+		t.Error("xmlEscape not applied in getUsersBlogs request")
+	}
+	if !xmlrpcHasMulticall("...system.multicall...") || xmlrpcHasMulticall("nope") {
+		t.Error("xmlrpcHasMulticall wrong")
 	}
 }
 

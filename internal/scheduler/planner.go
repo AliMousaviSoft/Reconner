@@ -133,8 +133,11 @@ var moduleRequires = map[string][]string{
 	ModuleWPDetect:  capCoreWeb,
 	ModuleWPEnum:    capCoreWeb,
 	ModuleWPUsers:   capCoreWeb,
-	ModuleWPConfig:  capCoreWeb,
-	ModuleWPBackups: capCoreWeb,
+	ModuleWPConfig:    capCoreWeb,
+	ModuleWPBackups:   capCoreWeb,
+	ModuleWPEndpoints: capCoreWeb,
+	ModuleWPMisconfig: capCoreWeb,
+	ModuleWPCredAudit: capCoreWeb,
 	// broken-link hijacking scans DISCOVERED pages' outbound links, so it wants the
 	// full crawl surface (deep pages are where dead external links hide), not just
 	// the host roots.

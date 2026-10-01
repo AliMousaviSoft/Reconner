@@ -23,6 +23,7 @@ var moduleETASeconds = map[string]int{
 	"oast": 60, "passive": 60, "takeover": 30, "exposure": 90, "intel": 60,
 	"origin_ip": 40, "shodan": 30, "race": 40, "smuggling": 40, "ato": 60,
 	"wp_detect": 60, "wp_enum": 120, "wp_users": 40, "wp_config": 60, "wp_backups": 90,
+	"wp_endpoints": 40, "wp_misconfig": 40, "wp_credaudit": 120,
 	"verify": 60, "monitor": 20,
 }
 

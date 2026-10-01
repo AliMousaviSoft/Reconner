@@ -81,8 +81,11 @@ const (
 	ModuleWPDetect  = "wp_detect"
 	ModuleWPEnum    = "wp_enum"
 	ModuleWPUsers   = "wp_users"
-	ModuleWPConfig  = "wp_config"
-	ModuleWPBackups = "wp_backups"
+	ModuleWPConfig    = "wp_config"
+	ModuleWPBackups   = "wp_backups"
+	ModuleWPEndpoints = "wp_endpoints"
+	ModuleWPMisconfig = "wp_misconfig"
+	ModuleWPCredAudit = "wp_credaudit"
 	// Network phase IDs are planned through the asset-gated network pipeline and
 	// intentionally stay outside AllModules, whose contract table describes the
 	// web pipeline. Only the four phases admitted by isNetworkModule execute;
@@ -144,6 +147,9 @@ var AllModules = []string{
 	ModuleWPUsers,
 	ModuleWPConfig,
 	ModuleWPBackups,
+	ModuleWPEndpoints,
+	ModuleWPMisconfig,
+	ModuleWPCredAudit,
 	ModuleVerify,
 	ModuleMonitor,
 }
@@ -2503,6 +2509,12 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.wpScanner.RunConfigExposure(ctx, targetID, logFn)
 	case ModuleWPBackups:
 		return s.wpScanner.RunBackups(ctx, targetID, logFn)
+	case ModuleWPEndpoints:
+		return s.wpScanner.RunEndpoints(ctx, targetID, logFn)
+	case ModuleWPMisconfig:
+		return s.wpScanner.RunMisconfig(ctx, targetID, logFn)
+	case ModuleWPCredAudit:
+		return s.wpScanner.RunCredAudit(ctx, targetID, logFn)
 	}
 	return fmt.Errorf("%w: %q", ErrInvalidModuleSelection, module)
 }

@@ -232,6 +232,16 @@ type Config struct {
 	// sqlmap). Covers GET/POST/JSON insertion points, the class of bugs template
 	// matchers structurally miss. On by default; opt out with "enable_dast": false.
 	EnableDAST bool `json:"enable_dast"`
+	// EnableWPCredentialAudit authorizes the WordPress weak-credential audit
+	// (module wp_credaudit) to actually TRY passwords. It is OFF by default and is
+	// the explicit, auditable authorization switch for active credential testing:
+	// with it off the module runs a non-intrusive surface check only (it reports the
+	// XML-RPC brute-force/amplification surface but never submits a credential), so
+	// even a "select all modules" scan can never spray passwords unattended. With it
+	// on, the audit stays deliberately conservative — enumerated usernames × a tiny
+	// curated weak-password list, rate-limited and capped, confirmed only by a
+	// definitive auth-success signal — to avoid lockouts and noise.
+	EnableWPCredentialAudit bool `json:"enable_wp_credential_audit"`
 	// AIEnabled turns on the autonomous AI orchestrator: a Claude tool-use loop
 	// that drives Reconner's OWN engines (recon/DAST/nuclei/OAST/verify) toward a
 	// proven bug, optionally seeded with an operator hypothesis, and can focus on
@@ -575,6 +585,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("RECON_SHODAN_KEY"); v != "" {
 		c.ShodanAPIKey = v
+	}
+	if v := os.Getenv("RECON_ENABLE_WP_CREDENTIAL_AUDIT"); v == "true" || v == "1" {
+		c.EnableWPCredentialAudit = true
 	}
 }
 
