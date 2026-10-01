@@ -60,4 +60,7 @@ var V3ModuleContracts = map[string]ModuleContract{
 	ModuleSmuggling:       {"detector", "explicit opt-in live HTTP service", "CL.TE and TE.CL controls attempted", "fast baselines plus reproducible framing delay; candidate", "scanner/detector_coverage_test.go"},
 	ModuleVerify:          {"postprocess", "pending verifiable candidates", "bounded verifier queue drained", "class-specific independent verification", "scanner/candidate_verify_test.go"},
 	ModuleMonitor:         {"monitor", "live baseline or prior snapshot", "bounded snapshot/diff completed", "stable repeated change against persisted baseline", "scanner/monitor_run_test.go"},
+	ModuleWPDetect:        {"detector", "live HTTP service", "every in-scope host root probed for the WordPress detection gate", "WordPress-unique signal (wp/v2 REST namespace or wp-login credential form) recorded in wp_sites", "scanner/wordpress_test.go"},
+	ModuleWPEnum:          {"detector", "WordPress host confirmed by the detection gate", "core version plus referenced/probed plugins and themes enumerated", "version read from an authoritative source; plugin/theme confirmed by its own asset or readme", "scanner/wordpress_test.go"},
+	ModuleWPUsers:         {"detector", "WordPress host confirmed by the detection gate", "REST, author-archive and oembed user sources attempted", "username returned by WordPress itself (never inferred)", "scanner/wordpress_test.go"},
 }

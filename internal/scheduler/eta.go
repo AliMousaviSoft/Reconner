@@ -22,6 +22,7 @@ var moduleETASeconds = map[string]int{
 	"ssti": 60, "csti": 45, "cmdi": 120, "nosqli": 60, "cache_poison": 40, "xxe": 60, "jwt": 30,
 	"oast": 60, "passive": 60, "takeover": 30, "exposure": 90, "intel": 60,
 	"origin_ip": 40, "shodan": 30, "race": 40, "smuggling": 40, "ato": 60,
+	"wp_detect": 60, "wp_enum": 120, "wp_users": 40,
 	"verify": 60, "monitor": 20,
 }
 

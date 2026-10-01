@@ -73,6 +73,14 @@ const (
 	ModuleSmuggling       = "smuggling"
 	ModuleVerify          = "verify"
 	ModuleMonitor         = "monitor"
+	// WordPress pipeline. Each wp_* module is individually selectable (like the web
+	// detectors) and self-gates on the WordPress detection result: ModuleWPDetect
+	// verifies which hosts are really WordPress (wp_sites), and every other wp_*
+	// module acts ONLY on those confirmed hosts, so a non-WordPress domain yields
+	// nothing from any of them.
+	ModuleWPDetect = "wp_detect"
+	ModuleWPEnum   = "wp_enum"
+	ModuleWPUsers  = "wp_users"
 	// Network phase IDs are planned through the asset-gated network pipeline and
 	// intentionally stay outside AllModules, whose contract table describes the
 	// web pipeline. Only the four phases admitted by isNetworkModule execute;
@@ -129,6 +137,9 @@ var AllModules = []string{
 	ModuleShodan,
 	ModuleRace,
 	ModuleSmuggling,
+	ModuleWPDetect,
+	ModuleWPEnum,
+	ModuleWPUsers,
 	ModuleVerify,
 	ModuleMonitor,
 }
@@ -192,6 +203,7 @@ type Scheduler struct {
 	smugglingScanner   *scanner.SmugglingScanner
 	verifyScanner      *scanner.VerifyScanner
 	monitorScanner     *scanner.MonitorScanner
+	wpScanner          *scanner.WordPressScanner
 	bountyCatalog      *bounty.Service
 
 	queue     chan string
@@ -284,6 +296,7 @@ func New(db *database.DB, hub *websocket.Hub, cfg *config.Config, log *logger.Lo
 	s.smugglingScanner = scanner.NewSmugglingScanner(db, exec, cfg, log, bc)
 	s.verifyScanner = scanner.NewVerifyScanner(db, exec, cfg, log, bc)
 	s.monitorScanner = scanner.NewMonitorScanner(db, exec, cfg, log, bc)
+	s.wpScanner = scanner.NewWordPressScanner(db, cfg, log, bc)
 	s.bountyCatalog = bounty.NewService(db, log)
 	s.bountyCatalog.SetScopeEventNotify(s.notifyBountyScopeEvent)
 
@@ -2476,6 +2489,12 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.verifyScanner.Run(ctx, targetID, logFn)
 	case ModuleMonitor:
 		return s.monitorScanner.Run(ctx, targetID, logFn)
+	case ModuleWPDetect:
+		return s.wpScanner.Run(ctx, targetID, logFn)
+	case ModuleWPEnum:
+		return s.wpScanner.RunEnumeration(ctx, targetID, logFn)
+	case ModuleWPUsers:
+		return s.wpScanner.RunUsers(ctx, targetID, logFn)
 	}
 	return fmt.Errorf("%w: %q", ErrInvalidModuleSelection, module)
 }

@@ -156,6 +156,7 @@ func RunMigrations(db *DB) error {
 		alterTasksAddAssetsTotal,
 		alterAdminPanelFindingsAddScreenshotID,
 		alterVulnFindingsAddScreenshotID,
+		createWPSitesTable,
 	}
 
 	for i, m := range migrations {
@@ -696,6 +697,30 @@ CREATE TABLE IF NOT EXISTS auth_events (
 	state TEXT NOT NULL DEFAULT '',
 	detail TEXT NOT NULL DEFAULT '',
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+);`
+
+// wp_sites is the authoritative record of the WordPress detection gate. The WP
+// pipeline NEVER acts on a host until it appears here with is_wordpress=1, so a
+// non-WordPress domain the operator entered can never trigger a WP finding. One
+// row per probed base URL: is_wordpress is the verified verdict, version is the
+// corroborated core version (empty when unknown), confidence is the detection
+// score (>=ConfEvidence only when 2+ independent WP-unique signals agreed), and
+// signals is the human-readable evidence list that justified the verdict. This
+// table is both the gate and the "which domains are actually WordPress" view the
+// WP Scanner page shows the operator.
+const createWPSitesTable = `
+CREATE TABLE IF NOT EXISTS wp_sites (
+	id TEXT PRIMARY KEY,
+	target_id TEXT NOT NULL,
+	url TEXT NOT NULL,
+	host TEXT NOT NULL DEFAULT '',
+	is_wordpress INTEGER NOT NULL DEFAULT 0,
+	version TEXT NOT NULL DEFAULT '',
+	confidence INTEGER NOT NULL DEFAULT 0,
+	signals TEXT NOT NULL DEFAULT '',
+	detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(target_id, url),
 	FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
 );`
 

@@ -72,6 +72,8 @@ var corpusSpecs = map[string]corpusSpec{
 		return []string{"admin", "administrator", "root", "user", "operator", "manager", "support", "guest", "test", "webadmin"}
 	}},
 	"basic_auth_passwords": {"HTTP Basic passwords", "wordlist", "Top 1000 deterministic common-password candidates for the explicit network Basic-auth audit.", defaultBasicAuthPasswords},
+	"wp_plugins":           {"WordPress plugin slugs", "wordlist", "Most-installed plugin slugs probed (readme.txt-confirmed) by WordPress enumeration.", func() []string { return append([]string{}, wpTopPluginSlugs...) }},
+	"wp_themes":            {"WordPress theme slugs", "wordlist", "Common theme slugs probed (style.css-confirmed) by WordPress enumeration.", func() []string { return append([]string{}, wpTopThemeSlugs...) }},
 	"xss":                  {"XSS", "payload", "Browser-proof templates. Each template must set top.document.title to the single %s nonce.", xssBrowserPayloads},
 	"sqli":                 {"SQL injection", "payload", "Supplemental error-based SQL injection probes, replayed before a finding is accepted.", func() []string { return []string{"'", `"`, "' OR '1'='1'-- -", "1 AND 1=1", "1 AND 1=2"} }},
 	"lfi":                  {"LFI / traversal", "payload", "Local-file inclusion and traversal probes.", func() []string { return append([]string{}, lfiPayloads...) }},
