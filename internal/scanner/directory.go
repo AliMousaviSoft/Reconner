@@ -737,6 +737,10 @@ func scanBackupCandidatesWithCorpus(ctx context.Context, db *database.DB, target
 		brandWords = append(brandWords, top...)
 	}
 	patterns = append(patterns, generateBrandedBackupCandidates(brandWords, 12)...)
+	// Directory-prefixed brand/word archives (/backup/acme.zip, /db/db_2025.sql.gz)
+	// — the most common real layout, which every root-only generator misses. Pure
+	// recall win; still magic-byte confirmed, so no new false positives.
+	patterns = append(patterns, generateDirectoryBackupCandidates(brandWords, 1200)...)
 	patterns = append(patterns, corpus...)
 	patterns = append(patterns, generateBackupCandidates(domain)...)
 	patterns = uniquePaths(patterns)

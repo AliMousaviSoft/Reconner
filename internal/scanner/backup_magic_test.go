@@ -115,3 +115,36 @@ func TestGenerateBackupCandidatesStillUsesDomainBrandNames(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateDirectoryBackupCandidates(t *testing.T) {
+	out := generateDirectoryBackupCandidates([]string{"acmecorp"}, 1500)
+	joined := "\n" + strings.Join(out, "\n") + "\n"
+
+	// The site's own name under a backup directory — the highest-yield real layout.
+	for _, want := range []string{"\n/backup/acmecorp.zip\n", "\n/db/acmecorp.sql\n", "\n/dumps/acmecorp.tar.gz\n"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing brand-in-directory candidate %q", strings.TrimSpace(want))
+		}
+	}
+	// Generic archive names under directories.
+	for _, want := range []string{"\n/backup/db.sql.gz\n", "\n/dump/database.sql\n", "\n/backups/backup.zip\n"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing generic-in-directory candidate %q", strings.TrimSpace(want))
+		}
+	}
+	// A dated brand archive under a directory.
+	y := strconv.Itoa(time.Now().Year())
+	if !strings.Contains(joined, "/backup/acmecorp_"+y+".sql.gz") {
+		t.Errorf("missing dated brand-in-directory candidate for year %s", y)
+	}
+	// Every candidate is an absolute, directory-nested path with an archive ext.
+	for _, p := range out {
+		if !strings.HasPrefix(p, "/") || strings.Count(p, "/") < 2 {
+			t.Fatalf("candidate must be directory-nested absolute path: %q", p)
+		}
+	}
+	// Budget is respected.
+	if len(out) > 1500 {
+		t.Fatalf("budget exceeded: %d", len(out))
+	}
+}

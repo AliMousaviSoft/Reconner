@@ -84,6 +84,7 @@ var backupExtensions = []string{
 	".zip", ".rar", ".sql", ".bak", ".tar.gz", ".tar", ".7z", ".gz",
 	".backup", ".old", ".db", ".sql.gz", ".sql.zip", ".sql.bak", ".txt",
 	".zst", ".tar.zst", ".sql.zst", ".xz", ".tar.xz",
+	".tgz", ".war", ".tar.bz2", ".dump",
 }
 
 // coreBackupExts is the smaller, highest-signal set used for the bulky wordlist /
@@ -331,6 +332,95 @@ const (
 	nestedBackupDirectoryBudget = 20
 	nestedBackupCandidateBudget = 256
 )
+
+// commonBackupDirs are the directories a real backup archive most often lives in
+// (sysadmins rarely drop a dump at web root). Crossed with brand/word names below.
+var commonBackupDirs = []string{
+	"backup", "backups", "back", "old", "archive", "archives", "bak",
+	"db", "database", "dump", "dumps", "sql", "data", "export", "exports",
+	"files", "download", "downloads", "tmp", "temp", "storage", "private", "_backup",
+}
+
+// dirBackupNames are the highest-signal generic archive base names tried under
+// each backup directory, IN ADDITION to the site's own brand words.
+var dirBackupNames = []string{
+	"backup", "db", "database", "dump", "site", "www", "web", "full", "data",
+	"export", "archive", "latest", "all",
+}
+
+// dirBackupExts is the archive/dump extension set used under directories. Wider
+// than the brand set (these are the likeliest dump formats), still bounded.
+var dirBackupExts = []string{".zip", ".sql", ".tar.gz", ".sql.gz", ".bak", ".gz", ".7z", ".tgz"}
+
+// generateDirectoryBackupCandidates places brand- and word-named archives UNDER
+// the common backup directories (e.g. /backup/acmecorp.zip, /db/db_2025.sql.gz,
+// /dumps/database.sql). The root-only generators miss this — the single most
+// common real layout — so this is a pure recall win. Still zero-false-positive:
+// every hit is magic-byte confirmed downstream. Bounded by `limit` so a large
+// target's request budget stays predictable; directories and brand words are
+// prioritised ahead of the generic fill so the likeliest paths schedule first.
+func generateDirectoryBackupCandidates(brandWords []string, limit int) []string {
+	if limit <= 0 {
+		limit = 1500
+	}
+	year := time.Now().Year()
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) bool {
+		if p == "" || seen[p] {
+			return true
+		}
+		seen[p] = true
+		out = append(out, p)
+		return len(out) < limit
+	}
+
+	// Normalize brand words once (dedup against generics handled per-pass).
+	var brands []string
+	bseen := map[string]bool{}
+	for _, w := range brandWords {
+		if w = normalizeAdaptiveWord(w); w != "" && !bseen[w] {
+			bseen[w] = true
+			brands = append(brands, w)
+		}
+	}
+
+	// Pass 1 — the site's OWN name under EVERY backup directory, including dated
+	// variants. This is the highest-yield layout, so it runs first and in full.
+	for _, name := range brands {
+		for _, dir := range commonBackupDirs {
+			for _, ext := range dirBackupExts {
+				if !add("/" + dir + "/" + name + ext) {
+					return out
+				}
+			}
+			for _, y := range []int{year, year - 1} {
+				if !add(fmt.Sprintf("/%s/%s_%d.sql.gz", dir, name, y)) {
+					return out
+				}
+				if !add(fmt.Sprintf("/%s/%s_%d.zip", dir, name, y)) {
+					return out
+				}
+			}
+		}
+	}
+
+	// Pass 2 — generic archive names under each directory, filling the remaining
+	// budget (dir-outer so the likeliest directories are covered first).
+	for _, dir := range commonBackupDirs {
+		for _, name := range dirBackupNames {
+			if bseen[name] {
+				continue
+			}
+			for _, ext := range dirBackupExts {
+				if !add("/" + dir + "/" + name + ext) {
+					return out
+				}
+			}
+		}
+	}
+	return out
+}
 
 // generateNestedBackupCandidates covers high-signal sensitive files below a
 // small set of common or already-observed directories. It deliberately does not
