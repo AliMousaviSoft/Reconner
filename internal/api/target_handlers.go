@@ -727,28 +727,40 @@ func (h *Handler) handleSetAuth(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleListIdentities(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	// REDACTED by construction: this selects only lifecycle METADATA, never
+	// headers_json / storage_json / refresh_request, so no secret can leave here.
 	rows, err := h.db.Query(`SELECT id, label, role, COALESCE(is_baseline,0), COALESCE(status,'unknown'),
-	   COALESCE(auth_method,'headers'), COALESCE(last_verified_at,'') FROM identities WHERE target_id=? ORDER BY is_baseline DESC, created_at ASC`, id)
+	   COALESCE(auth_method,'headers'), COALESCE(last_verified_at,''), COALESCE(expires_at,''),
+	   COALESCE(last_refreshed,''), COALESCE(refresh_strategy,'none'), COALESCE(refresh_attempts,0),
+	   COALESCE(validation_url,'') FROM identities WHERE target_id=? ORDER BY is_baseline DESC, created_at ASC`, id)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
 	defer rows.Close()
 	type ident struct {
-		ID           string `json:"id"`
-		Label        string `json:"label"`
-		Role         string `json:"role"`
-		IsBaseline   bool   `json:"is_baseline"`
-		Status       string `json:"status"`
-		AuthMethod   string `json:"auth_method"`
-		LastVerified string `json:"last_verified_at"`
+		ID              string `json:"id"`
+		Label           string `json:"label"`
+		Role            string `json:"role"`
+		IsBaseline      bool   `json:"is_baseline"`
+		Status          string `json:"status"`
+		AuthMethod      string `json:"auth_method"`
+		LastVerified    string `json:"last_verified_at"`
+		ExpiresAt       string `json:"expires_at"`
+		LastRefreshed   string `json:"last_refreshed"`
+		RefreshStrategy string `json:"refresh_strategy"`
+		RefreshAttempts int    `json:"refresh_attempts"`
+		HasValidation   bool   `json:"has_validation"`
 	}
 	out := []ident{}
 	for rows.Next() {
 		var it ident
 		var base int
-		if rows.Scan(&it.ID, &it.Label, &it.Role, &base, &it.Status, &it.AuthMethod, &it.LastVerified) == nil {
+		var validationURL string
+		if rows.Scan(&it.ID, &it.Label, &it.Role, &base, &it.Status, &it.AuthMethod, &it.LastVerified,
+			&it.ExpiresAt, &it.LastRefreshed, &it.RefreshStrategy, &it.RefreshAttempts, &validationURL) == nil {
 			it.IsBaseline = base != 0
+			it.HasValidation = strings.TrimSpace(validationURL) != ""
 			out = append(out, it)
 		}
 	}
@@ -1296,7 +1308,56 @@ func (h *Handler) handleValidateIdentity(w http.ResponseWriter, r *http.Request)
 	}
 	status := scanner.ValidateSession(scanCtx, *target)
 	_, _ = h.db.Exec(`UPDATE identities SET status=?, last_verified_at=CURRENT_TIMESTAMP WHERE id=?`, status, iid)
+	scanner.RecordAuthEvent(scanCtx, h.db, targetID, iid, target.Label, scanner.AuthEventValidated,
+		scanner.SessStateForVerdict(status), "operator-triggered validation")
 	h.writeSuccess(w, map[string]string{"status": status})
+}
+
+// handleRefreshIdentity runs the identity's configured refresh strategy on demand
+// and reports the resulting lifecycle state (issue #45 dashboard "Refresh").
+func (h *Handler) handleRefreshIdentity(w http.ResponseWriter, r *http.Request) {
+	targetID := mux.Vars(r)["id"]
+	iid := mux.Vars(r)["iid"]
+	scanCtx := scanner.WithTargetRequestIdentity(r.Context(), h.db, h.cfg, targetID)
+	box := secret.New(h.cfg.SessionSecret)
+	ids := scanner.LoadIdentities(scanCtx, h.db, targetID, box)
+	var target *scanner.Identity
+	for i := range ids {
+		if ids[i].ID == iid {
+			target = &ids[i]
+			break
+		}
+	}
+	if target == nil {
+		h.writeError(w, http.StatusNotFound, "identity not found")
+		return
+	}
+	state, ok := scanner.RefreshSession(scanCtx, h.db, box, targetID, *target)
+	h.writeSuccess(w, map[string]any{"state": state, "refreshed": ok})
+}
+
+// handleRevokeIdentity marks a profile revoked AND wipes its stored secret
+// material (headers/storage/refresh request), so a revoked session can never be
+// replayed. Idempotent. Records a sanitized audit event.
+func (h *Handler) handleRevokeIdentity(w http.ResponseWriter, r *http.Request) {
+	targetID := mux.Vars(r)["id"]
+	iid := mux.Vars(r)["iid"]
+	var label string
+	_ = h.db.QueryRow(`SELECT COALESCE(label,'') FROM identities WHERE id=? AND target_id=?`, iid, targetID).Scan(&label)
+	res, err := h.db.Exec(`UPDATE identities
+		SET status='revoked', headers_json='{}', storage_json='', refresh_request='', refresh_strategy='none'
+		WHERE id=? AND target_id=?`, iid, targetID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "revoke failed")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.writeError(w, http.StatusNotFound, "identity not found")
+		return
+	}
+	scanner.RecordAuthEvent(r.Context(), h.db, targetID, iid, label, scanner.AuthEventRevoked, scanner.SessRevoked,
+		"operator revoked the profile; stored credentials wiped")
+	h.writeSuccess(w, map[string]string{"status": "revoked"})
 }
 
 func (h *Handler) handleDeleteIdentity(w http.ResponseWriter, r *http.Request) {
@@ -1306,6 +1367,35 @@ func (h *Handler) handleDeleteIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeSuccess(w, map[string]string{"status": "deleted"})
+}
+
+// handleListAuthEvents returns the sanitized authentication-lifecycle timeline
+// for a target (issue #45). Rows are redacted at write time, so this is safe to
+// surface directly.
+func (h *Handler) handleListAuthEvents(w http.ResponseWriter, r *http.Request) {
+	targetID := mux.Vars(r)["id"]
+	rows, err := h.db.Query(`SELECT COALESCE(identity_label,''), event, COALESCE(state,''), COALESCE(detail,''), created_at
+		FROM auth_events WHERE target_id=? ORDER BY created_at DESC LIMIT 200`, targetID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+	defer rows.Close()
+	type authEvent struct {
+		IdentityLabel string `json:"identity_label"`
+		Event         string `json:"event"`
+		State         string `json:"state"`
+		Detail        string `json:"detail"`
+		CreatedAt     string `json:"created_at"`
+	}
+	out := []authEvent{}
+	for rows.Next() {
+		var e authEvent
+		if rows.Scan(&e.IdentityLabel, &e.Event, &e.State, &e.Detail, &e.CreatedAt) == nil {
+			out = append(out, e)
+		}
+	}
+	h.writeSuccess(w, out)
 }
 
 func (h *Handler) handleStartScan(w http.ResponseWriter, r *http.Request) {

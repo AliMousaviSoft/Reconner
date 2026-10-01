@@ -68,8 +68,8 @@ func TestRecordAuthEventPersistsSanitized(t *testing.T) {
 func TestSessionStateFromValidation(t *testing.T) {
 	cases := map[string]string{"authenticated": SessHealthy, "expired": SessExpired, "unknown": SessUnknown, "": SessUnknown}
 	for in, want := range cases {
-		if got := sessionStateFromValidation(in); got != want {
-			t.Errorf("sessionStateFromValidation(%q) = %q, want %q", in, got, want)
+		if got := SessStateForVerdict(in); got != want {
+			t.Errorf("SessStateForVerdict(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

@@ -107,9 +107,9 @@ func AuthGate(ctx context.Context, db *database.DB, box *secret.Box, targetID st
 	}
 }
 
-// sessionStateFromValidation maps the ValidateSession verdict
+// SessStateForVerdict maps the ValidateSession verdict
 // (authenticated|expired|unknown) onto the lifecycle state model.
-func sessionStateFromValidation(verdict string) string {
+func SessStateForVerdict(verdict string) string {
 	switch verdict {
 	case "authenticated":
 		return SessHealthy
