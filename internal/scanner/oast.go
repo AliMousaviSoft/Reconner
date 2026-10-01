@@ -142,7 +142,15 @@ func (s *OASTScanner) Run(ctx context.Context, targetID string, logFn LogFunc) e
 	}
 
 	wg.Wait()
-	logFn("info", "oast", fmt.Sprintf("OAST done. %d Log4Shell/header probe(s) planted; execution reported via callback.", planted))
+
+	// Blind insecure-deserialization: plant text/base64 payloads whose only effect
+	// is an out-of-band callback, across likely deserialization sinks. Confirmed
+	// solely by the callback (RecordOOBHit → insecure_deserialization), so it is
+	// zero-false-positive and complements the per-objective blind classes above.
+	deserN := plantBlindDeserialization(ctx, oob, s, targetID, points, auth)
+	planted += deserN
+
+	logFn("info", "oast", fmt.Sprintf("OAST done. %d Log4Shell/header + %d deserialization probe(s) planted; execution reported via callback.", planted-deserN, deserN))
 	return nil
 }
 
