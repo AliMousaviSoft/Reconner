@@ -120,6 +120,7 @@ export const targets = {
   refreshIdentity: (id: string, iid: string) => req<{ state: string; refreshed: boolean }>(`/targets/${id}/identities/${iid}/refresh`, { method: 'POST' }),
   revokeIdentity: (id: string, iid: string) => req<{ status: string }>(`/targets/${id}/identities/${iid}/revoke`, { method: 'POST' }),
   authEvents: (id: string) => req<{ identity_label: string; event: string; state: string; detail: string; created_at: string }[]>(`/targets/${id}/auth-events`),
+  wpSites: (id: string) => req<{ url: string; host: string; is_wordpress: boolean; version: string; confidence: number; signals: string; detected_at: string }[]>(`/targets/${id}/wp-sites`),
   evidence: (id: string, fid: string) => req<{ identity_label: string; request: string; response: string; comparison: string; note: string }[]>(`/targets/${id}/findings/${fid}/evidence`),
   replay: (id: string, body: { method?: string; url: string; body?: string; content_type?: string; identity_id?: string }) =>
     req<{ results: { identity_label: string; status: number; content_type: string; length: number; body: string; verdict: string; timing_ms: number }[]; comparison?: string }>(`/targets/${id}/replay`, { method: 'POST', body: JSON.stringify(body) }),

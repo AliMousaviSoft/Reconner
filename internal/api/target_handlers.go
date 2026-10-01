@@ -1398,6 +1398,42 @@ func (h *Handler) handleListAuthEvents(w http.ResponseWriter, r *http.Request) {
 	h.writeSuccess(w, out)
 }
 
+// handleListWPSites returns the WordPress detection-gate verdicts for a target —
+// which probed host roots were CONFIRMED WordPress (and the corroborated core
+// version + evidence signals). The WP Scanner page uses it to show the operator
+// exactly which of the domains they entered actually entered the WordPress
+// pipeline. Read-only; no secrets.
+func (h *Handler) handleListWPSites(w http.ResponseWriter, r *http.Request) {
+	targetID := mux.Vars(r)["id"]
+	rows, err := h.db.Query(`SELECT url, COALESCE(host,''), is_wordpress, COALESCE(version,''),
+		COALESCE(confidence,0), COALESCE(signals,''), detected_at
+		FROM wp_sites WHERE target_id=? ORDER BY is_wordpress DESC, url`, targetID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+	defer rows.Close()
+	type wpSiteRow struct {
+		URL         string `json:"url"`
+		Host        string `json:"host"`
+		IsWordPress bool   `json:"is_wordpress"`
+		Version     string `json:"version"`
+		Confidence  int    `json:"confidence"`
+		Signals     string `json:"signals"`
+		DetectedAt  string `json:"detected_at"`
+	}
+	out := []wpSiteRow{}
+	for rows.Next() {
+		var s wpSiteRow
+		var isWP int
+		if rows.Scan(&s.URL, &s.Host, &isWP, &s.Version, &s.Confidence, &s.Signals, &s.DetectedAt) == nil {
+			s.IsWordPress = isWP == 1
+			out = append(out, s)
+		}
+	}
+	h.writeSuccess(w, out)
+}
+
 func (h *Handler) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 

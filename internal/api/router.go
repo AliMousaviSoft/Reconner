@@ -158,6 +158,7 @@ func (h *Handler) Router() http.Handler {
 	api.HandleFunc("/targets/{id}/identities/{iid}/revoke", h.requireAuth(h.handleRevokeIdentity)).Methods("POST")
 	api.HandleFunc("/targets/{id}/identities/import", h.requireAuth(h.handleImportSession)).Methods("POST")
 	api.HandleFunc("/targets/{id}/auth-events", h.requireAuth(h.handleListAuthEvents)).Methods("GET")
+	api.HandleFunc("/targets/{id}/wp-sites", h.requireAuth(h.handleListWPSites)).Methods("GET")
 	api.HandleFunc("/targets/{id}/findings/{fid}/evidence", h.requireAuth(h.handleListEvidence)).Methods("GET")
 	api.HandleFunc("/targets/{id}/findings/{fid}/triage", h.requireAuth(h.handleSetFindingTriage)).Methods("POST", "PATCH")
 	api.HandleFunc("/targets/{id}/replay", h.requireAuth(h.handleReplay)).Methods("POST")
