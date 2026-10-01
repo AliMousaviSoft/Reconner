@@ -35,7 +35,7 @@ var perAssetModuleSet = map[string]bool{
 	ModuleBLH:      true,
 	ModuleWPDetect: true, ModuleWPEnum: true, ModuleWPUsers: true,
 	ModuleWPConfig: true, ModuleWPBackups: true, ModuleWPEndpoints: true,
-	ModuleWPMisconfig: true, ModuleWPCredAudit: true,
+	ModuleWPMisconfig: true, ModuleWPCredAudit: true, ModuleWPVulns: true,
 }
 
 // lightTierModuleSet runs on duplicate/wildcard-catch-all hosts instead of the

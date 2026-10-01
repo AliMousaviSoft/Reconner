@@ -1,0 +1,23 @@
+id: reconner-wp-config-source-disclosure
+info:
+  name: WordPress wp-config.php source disclosure
+  author: reconner
+  severity: critical
+  description: wp-config.php is served as raw source instead of being executed, leaking the database credentials and secret auth keys. A normally-executed wp-config.php returns no body, so a match is a genuine source-disclosure misconfiguration.
+  tags: reconner,wordpress,config,exposure,source-disclosure
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-config.php"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "DB_PASSWORD"
+          - "DB_NAME"
+          - "define("
+        condition: and
+      - type: status
+        status:
+          - 200

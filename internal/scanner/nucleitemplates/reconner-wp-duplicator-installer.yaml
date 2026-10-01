@@ -1,0 +1,25 @@
+id: reconner-wp-duplicator-installer
+info:
+  name: WordPress Duplicator installer exposed
+  author: reconner
+  severity: critical
+  description: A live Duplicator restore/installer script lets an attacker rebuild the site over an attacker-supplied database (full site/DB takeover, frequently RCE). Confirmed by the installer's own Duplicator + dup-installer markers.
+  tags: reconner,wordpress,duplicator,backup,takeover,rce
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/dup-installer/main.installer.php"
+      - "{{BaseURL}}/installer.php"
+      - "{{BaseURL}}/installer-backup.php"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Duplicator"
+          - "dup-installer"
+        condition: and
+      - type: status
+        status:
+          - 200

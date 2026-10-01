@@ -86,6 +86,7 @@ const (
 	ModuleWPEndpoints = "wp_endpoints"
 	ModuleWPMisconfig = "wp_misconfig"
 	ModuleWPCredAudit = "wp_credaudit"
+	ModuleWPVulns     = "wp_vulns"
 	// Network phase IDs are planned through the asset-gated network pipeline and
 	// intentionally stay outside AllModules, whose contract table describes the
 	// web pipeline. Only the four phases admitted by isNetworkModule execute;
@@ -150,6 +151,7 @@ var AllModules = []string{
 	ModuleWPEndpoints,
 	ModuleWPMisconfig,
 	ModuleWPCredAudit,
+	ModuleWPVulns,
 	ModuleVerify,
 	ModuleMonitor,
 }
@@ -2515,8 +2517,25 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.wpScanner.RunMisconfig(ctx, targetID, logFn)
 	case ModuleWPCredAudit:
 		return s.wpScanner.RunCredAudit(ctx, targetID, logFn)
+	case ModuleWPVulns:
+		return s.runWordPressVulns(ctx, targetID, logFn)
 	}
 	return fmt.Errorf("%w: %q", ErrInvalidModuleSelection, module)
+}
+
+// runWordPressVulns is the wp_vulns module: it runs the WordPress-tagged nuclei
+// corpus (the embedded FP-safe pack + the official projectdiscovery wordpress
+// templates synced at runtime) against ONLY the hosts the detection gate confirmed
+// as WordPress. ConfirmedHosts already honours the active host scope, so scoping
+// the nuclei run to its result composes correctly with per-asset prioritized scans.
+func (s *Scheduler) runWordPressVulns(ctx context.Context, targetID string, logFn scanner.LogFunc) error {
+	hosts := s.wpScanner.ConfirmedHosts(ctx, targetID, logFn)
+	if len(hosts) == 0 {
+		logFn("info", "wp_vulns", "No confirmed WordPress host in scope; skipping the WordPress nuclei run.")
+		return ctx.Err()
+	}
+	logFn("info", "wp_vulns", fmt.Sprintf("Running WordPress-tagged nuclei templates (embedded FP-safe pack + official corpus) against %d confirmed host(s)...", len(hosts)))
+	return s.nucleiScanner.Run(scanner.WithHostScope(ctx, hosts), targetID, nil, []string{"wordpress"}, logFn)
 }
 
 func containsModule(modules []string, wanted string) bool {

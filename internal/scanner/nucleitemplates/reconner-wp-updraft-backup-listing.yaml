@@ -1,0 +1,22 @@
+id: reconner-wp-updraft-backup-listing
+info:
+  name: WordPress UpdraftPlus backup directory listing
+  author: reconner
+  severity: high
+  description: The UpdraftPlus backup directory is browsable, exposing the site/database backup inventory for direct download. Confirmed by a genuine autoindex listing of the plugin's own directory.
+  tags: reconner,wordpress,updraftplus,backup,exposure
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/updraft/"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Index of"
+          - "updraft"
+        condition: and
+      - type: status
+        status:
+          - 200

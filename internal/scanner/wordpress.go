@@ -192,6 +192,29 @@ func (s *WordPressScanner) ensureDetected(ctx context.Context, targetID string, 
 	return s.loadConfirmedSites(ctx, targetID)
 }
 
+// ConfirmedHosts returns the bare hostnames of the target's verified WordPress
+// sites, running the detection gate once if needed. It respects the active host
+// scope (loadConfirmedSites filters by it), so it composes correctly with
+// per-asset prioritized scanning. Exported so the scheduler can scope the
+// WordPress-tagged nuclei run (module wp_vulns) to exactly these hosts.
+func (s *WordPressScanner) ConfirmedHosts(ctx context.Context, targetID string, logFn LogFunc) []string {
+	sites := s.ensureDetected(ctx, targetID, logFn)
+	seen := map[string]bool{}
+	var hosts []string
+	for _, st := range sites {
+		h := st.Host
+		if h == "" {
+			h = hostOf(st.URL)
+		}
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		hosts = append(hosts, h)
+	}
+	return hosts
+}
+
 func (s *WordPressScanner) gateHasRun(ctx context.Context, targetID string) bool {
 	var n int
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM wp_sites WHERE target_id=?`, targetID).Scan(&n)

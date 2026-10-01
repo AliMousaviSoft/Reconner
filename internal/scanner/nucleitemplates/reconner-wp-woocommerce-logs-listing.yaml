@@ -1,0 +1,22 @@
+id: reconner-wp-woocommerce-logs-listing
+info:
+  name: WordPress WooCommerce logs directory listing
+  author: reconner
+  severity: high
+  description: The WooCommerce log directory is browsable, exposing wc-logs that frequently contain order data, gateway errors, PII and occasionally secrets. Confirmed by a genuine autoindex listing.
+  tags: reconner,wordpress,woocommerce,exposure,logs
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/uploads/wc-logs/"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Index of"
+          - "wc-logs"
+        condition: and
+      - type: status
+        status:
+          - 200
