@@ -101,14 +101,9 @@ func (s *SmugglingScanner) testHost(ctx context.Context, targetID, rawURL string
 		return false
 	}
 
-	// Try CL.TE then TE.CL. Confirm any hit with a second probe to drop flukes.
-	for _, probe := range []struct {
-		name string
-		raw  string
-	}{
-		{"CL.TE", clteProbe(host, identityHeaders)},
-		{"TE.CL", teclProbe(host, identityHeaders)},
-	} {
+	// Try CL.TE (plus TE-header obfuscation variants) then TE.CL. Confirm any hit
+	// with a second probe to drop flukes.
+	for _, probe := range buildSmugProbes(host, identityHeaders) {
 		if ctx.Err() != nil {
 			return false
 		}
@@ -210,18 +205,54 @@ func baselineRequest(host, identityHeaders string) string {
 		"Connection: close\r\n\r\n"
 }
 
+// smugProbe is one named raw request used as a desync probe.
+type smugProbe struct {
+	name string
+	raw  string
+}
+
+// teObfuscations are Transfer-Encoding header lines (no trailing CRLF) that a
+// standards-strict hop treats as "no TE" while a lenient hop still honours as
+// chunked (or vice-versa) — the mismatch is exactly what a front-end/back-end
+// desync is. Each is the canonical PortSwigger TE-smuggling obfuscation; applying
+// them to the CL.TE framing catches desync hidden behind a normalising proxy that
+// the plain header does not. Detection stays time-based + double-confirmed, so
+// every added variant is still zero-false-positive — a delay only occurs on a real
+// desync, never on a server that simply ignores an odd header.
+var teObfuscations = []struct{ label, line string }{
+	{"plain", "Transfer-Encoding: chunked"},
+	{"space-before-colon", "Transfer-Encoding : chunked"},
+	{"tab-after-colon", "Transfer-Encoding:\tchunked"},
+	{"vertical-tab", "Transfer-Encoding: \x0bchunked"},
+	{"dual-header", "Transfer-Encoding: cow\r\nTransfer-Encoding: chunked"},
+	{"obs-fold", "Transfer-Encoding:\r\n chunked"},
+}
+
+// buildSmugProbes returns the full probe set for one host: every TE-obfuscation
+// under the CL.TE framing, plus the classic TE.CL probe. Ordered so the plain
+// variant (most hosts' only desync path) runs first.
+func buildSmugProbes(host, identityHeaders string) []smugProbe {
+	out := make([]smugProbe, 0, len(teObfuscations)+1)
+	for _, o := range teObfuscations {
+		out = append(out, smugProbe{"CL.TE/" + o.label, clteProbe(host, identityHeaders, o.line)})
+	}
+	out = append(out, smugProbe{"TE.CL", teclProbe(host, identityHeaders)})
+	return out
+}
+
 // CL.TE: the body is a COMPLETE, valid chunked message ("1\r\nA\r\n0\r\n\r\n").
 // A non-desync server responds fast whether it honours CL or TE. But if the
 // front-end uses Content-Length (4) it forwards only "1\r\nA" and drops the
 // terminating "0\r\n\r\n"; a back-end using Transfer-Encoding then blocks waiting
 // for the chunk terminator that never arrives → delay. Using a valid body is
-// what keeps this from false-positiving on ordinary TE servers.
-func clteProbe(host, identityHeaders string) string {
+// what keeps this from false-positiving on ordinary TE servers. teLine is the
+// (possibly obfuscated) Transfer-Encoding header, without its trailing CRLF.
+func clteProbe(host, identityHeaders, teLine string) string {
 	return "POST / HTTP/1.1\r\n" +
 		"Host: " + host + "\r\n" +
 		identityHeaders +
 		"Content-Length: 4\r\n" +
-		"Transfer-Encoding: chunked\r\n\r\n" +
+		teLine + "\r\n\r\n" +
 		"1\r\nA\r\n0\r\n\r\n"
 }
 
