@@ -25,6 +25,18 @@ const SCAN_PROFILES: { id: string; label: string; sub: string }[] = [
   { id: 'custom', label: 'Custom', sub: 'Your picks' },
 ]
 
+// WordPress scan levels for the generic project scan: when a level is picked,
+// confirmed WordPress hosts (the wp_detect gate self-filters) go through the
+// matching WP module set. Low stays light; medium is balanced; deep runs the
+// lot (excluding the explicit credential brute-force, which lives on the WP
+// Scanner page with its own authorization).
+const WP_SCAN_LEVELS: Record<string, string[]> = {
+  off: [],
+  low: ['wp_detect', 'wp_enum', 'wp_config'],
+  medium: ['wp_detect', 'wp_enum', 'wp_users', 'wp_config', 'wp_backups', 'wp_endpoints', 'wp_misconfig'],
+  deep: ['wp_detect', 'wp_enum', 'wp_users', 'wp_config', 'wp_backups', 'wp_endpoints', 'wp_misconfig', 'wp_vulns'],
+}
+
 type AssetLite = { id: string; value: string; kind: string; name: string }
 interface Props { target: Target; asset?: AssetLite; open: boolean; onClose: () => void; onStarted?: () => void }
 
@@ -94,6 +106,9 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   // many hosts a single cookie wouldn't fit, so this is hidden.
   const [authCookie, setAuthCookie] = useState('')
   const [authBearer, setAuthBearer] = useState('')
+  // WordPress scan level for this scan (off by default). When set, confirmed
+  // WordPress hosts additionally run the matching WP module set.
+  const [wpScanLevel, setWpScanLevel] = useState<'off' | 'low' | 'medium' | 'deep'>('off')
 
   // IDOR/BOLA is only provable with TWO identities (a victim who owns an object
   // and an attacker who tries to read it). When the IDOR module is selected we
@@ -114,6 +129,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
     setPrioritizedScan(false)
     setAuthCookie('')
     setAuthBearer('')
+    setWpScanLevel('off')
 		setNetworkMode(networkOnly)
 		setNetworkProfile('fast')
 		setNetworkModules(new Set(['network']))
@@ -247,6 +263,13 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
       if (asnDiscovery) orderedModules.push('asn_discovery')
       if (scopeIsURL && singleEndpoint) orderedModules.push('single_endpoint')
       if (!asset && prioritizedScan) orderedModules.push('prioritized')
+      // WordPress scan: add the chosen WP module set. The wp_detect gate self-
+      // filters to confirmed WordPress hosts, so these no-op on non-WP hosts.
+      if (wpScanLevel !== 'off') {
+        for (const m of WP_SCAN_LEVELS[wpScanLevel]) {
+          if (!orderedModules.includes(m)) orderedModules.push(m)
+        }
+      }
       await startModules(orderedModules)
       addToast('success', `Scan started for ${label}`)
       onClose()
@@ -338,6 +361,38 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
             {webSpeed === 'normal' && 'Balanced defaults — the standard scan speed.'}
             {webSpeed === 'fast' && 'Maximum request rate and concurrency. Fastest, but louder — likelier to trip WAF/rate-limits.'}
           </p>
+        </div>
+
+        {/* WordPress scan — confirmed WP hosts go through the WP pipeline. */}
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">WordPress scan <span className="normal-case font-normal text-text-muted/70">(auto-detected hosts only)</span></p>
+          <div className="grid grid-cols-4 gap-1.5">
+            {([
+              { id: 'off', label: 'Off', sub: 'Skip' },
+              { id: 'low', label: 'Low', sub: 'Version + config' },
+              { id: 'medium', label: 'Medium', sub: 'Balanced' },
+              { id: 'deep', label: 'Deep', sub: 'All + CVEs' },
+            ] as const).map(o => {
+              const on = wpScanLevel === o.id
+              return (
+                <button key={o.id} type="button" onClick={() => setWpScanLevel(o.id)}
+                  className={cn('px-3 py-2 rounded-lg border text-center transition-all',
+                    on ? 'bg-accent/[.12] border-accent/40 ring-1 ring-accent/20 text-accent' : 'bg-white/[.02] border-white/[.06] text-text-secondary hover:border-white/20')}>
+                  <div className="text-xs font-semibold">{o.label}</div>
+                  <div className="text-[10px] text-text-muted">{o.sub}</div>
+                </button>
+              )
+            })}
+          </div>
+          {wpScanLevel !== 'off' && (
+            <p className="text-[10px] text-text-muted mt-1">
+              A deep WordPress detection gate verifies which hosts are really WordPress; only those run the
+              {wpScanLevel === 'low' && ' version/plugin/theme enumeration and wp-config/sensitive-file exposure checks.'}
+              {wpScanLevel === 'medium' && ' enumeration, users, config/backup exposure, login/XML-RPC surface and misconfiguration audit.'}
+              {wpScanLevel === 'deep' && ' full WordPress pipeline including the WordPress-tagged nuclei CVE run.'}
+              {' '}For the dedicated multi-domain WordPress workflow (and the opt-in credential brute-force) use the WP Scanner page.
+            </p>
+          )}
         </div>
 
         {/* Classic module-by-module order is now the DEFAULT (fast: each module
