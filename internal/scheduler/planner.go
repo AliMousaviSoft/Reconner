@@ -162,7 +162,8 @@ var moduleRequires = map[string][]string{
 func passthroughModule(m string) bool {
 	switch m {
 	case "speed_slow", "speed_normal", "speed_fast",
-		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports":
+		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports",
+		"wp_cred_authorized":
 		return true
 	}
 	if len(m) >= 7 && m[:7] == "network" {

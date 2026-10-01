@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -99,8 +100,10 @@ func fakeWordPress() http.Handler {
 <value><string>wp.getUsersBlogs</string></value>
 </data></array></value></param></params></methodResponse>`))
 		case strings.Contains(body, "wp.getUsersBlogs"):
-			if strings.Contains(body, "<string>admin</string>") && strings.Contains(body, "<string>admin</string>") &&
-				strings.Count(body, "<string>admin</string>") >= 2 {
+			// Accept any username==password (a weak credential) — mirrors the audit's
+			// first guess (pw = username) so the success path is confirmed quickly.
+			sm := regexp.MustCompile(`<string>([^<]*)</string>`).FindAllStringSubmatch(body, -1)
+			if len(sm) >= 2 && sm[0][1] != "" && sm[0][1] == sm[1][1] {
 				_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><params><param><value><array><data>
 <value><struct><member><name>isAdmin</name><value><boolean>1</boolean></value></member>
 <member><name>blogName</name><value><string>Ex</string></value></member></struct></value>
@@ -394,6 +397,25 @@ func TestWordPressCredAuditGate(t *testing.T) {
 	db2.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_weak_credentials' AND severity='critical'`, tid2).Scan(&n)
 	if n == 0 {
 		t.Error("authorized credential audit did not confirm the weak admin/admin credential")
+	}
+}
+
+func TestWPCredContextAuthorization(t *testing.T) {
+	srv := httptest.NewServer(fakeWordPress())
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t) // default config: EnableWPCredentialAudit=false
+	addHTTPService(t, db, tid, srv.URL+"/")
+
+	// Per-scan authorization via context (what the WP Scanner tick sends) must
+	// enable the audit even though the server-wide config switch is off.
+	ctx := WithWPCredAuthorized(context.Background(), true)
+	if err := s.RunCredAudit(ctx, tid, noLog); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_weak_credentials'`, tid).Scan(&n)
+	if n == 0 {
+		t.Error("per-scan context authorization did not enable the credential audit")
 	}
 }
 

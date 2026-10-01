@@ -33,8 +33,8 @@ const WP_MODULES: WPModule[] = [
     desc: 'Reinstallable site (install.php/setup-config wizard), open registration, WP_DEBUG display — each content-confirmed.' },
   { id: 'wp_vulns', label: 'Known vulnerabilities (nuclei)', defaultOn: true,
     desc: 'WordPress-tagged nuclei corpus (embedded FP-safe pack + official templates) against confirmed hosts only.' },
-  { id: 'wp_credaudit', label: 'Weak-credential audit', danger: true, defaultOn: false,
-    desc: 'OPT-IN. Enumerated usernames × a tiny weak-password list, rate-limited and XML-RPC-confirmed. Requires enable_wp_credential_audit=true on the server; otherwise it runs a surface check only. Use only with explicit authorization.' },
+  { id: 'wp_credaudit', label: 'Weak-credential audit (brute force)', danger: true, defaultOn: false,
+    desc: 'OPT-IN. Sprays the top-1000 WordPress passwords against the ENUMERATED usernames, rate-limited and confirmed only by a definitive XML-RPC login success (no lockout). Ticking it authorizes active credential testing for this scan — use only against targets you are authorized to test.' },
 ]
 
 const defaultSelection = () => new Set(WP_MODULES.filter(m => m.defaultOn).map(m => m.id))
@@ -91,7 +91,18 @@ export default function WPScanner() {
   const selectedModules = () => {
     // wp_detect always first (the gate), then the chosen modules in catalog order.
     const picked = WP_MODULES.filter(m => m.id === 'wp_detect' || selected.has(m.id)).map(m => m.id)
+    // The weak-credential audit is dual-use: ticking it sends the per-scan
+    // authorization token so the backend will actually submit passwords.
+    if (selected.has('wp_credaudit')) picked.push('wp_cred_authorized')
     return Array.from(new Set(picked))
+  }
+
+  // Confirm active credential testing before launching when it is selected.
+  const confirmCredAudit = () => {
+    if (!selected.has('wp_credaudit')) return true
+    return window.confirm(
+      'Weak-credential audit is selected. This actively sprays the top-1000 WordPress passwords ' +
+      'against enumerated usernames. Only proceed if you are explicitly authorized to test these targets.\n\nStart the audit?')
   }
 
   const createProject = async () => {
@@ -99,6 +110,7 @@ export default function WPScanner() {
       addToast('error', 'Enter at least one domain.')
       return
     }
+    if (!confirmCredAudit()) return
     setLaunching(true)
     try {
       const mods = selectedModules()
@@ -203,9 +215,9 @@ export default function WPScanner() {
           </div>
           {credOn && (
             <div className="mt-2 rounded-lg border border-severity-high/40 bg-severity-high/[.07] p-3 text-[11px] leading-5 text-text-secondary">
-              <b className="text-severity-high">Credential audit selected.</b> Active password testing only runs if the server has
-              <span className="font-mono"> enable_wp_credential_audit=true</span>; otherwise this module performs a non-intrusive
-              surface check only. Use exclusively against targets you are explicitly authorized to test.
+              <b className="text-severity-high">Brute force selected.</b> On launch you'll confirm authorization, then Reconner sprays the
+              top-1000 WordPress passwords against the enumerated usernames (rate-limited, XML-RPC-confirmed, stops on first hit per user).
+              Use exclusively against targets you are explicitly authorized to test.
             </div>
           )}
         </div>

@@ -1,10 +1,33 @@
 package scanner
 
 import (
+	"bufio"
 	"context"
+	_ "embed"
 	"strings"
 	"time"
 )
+
+//go:embed wpassets/wp_passwords.txt
+var wpPasswordListRaw string
+
+// wpTop1000Passwords is the embedded default credential-audit list: a WordPress-
+// specific head (admin/wordpress/wp-admin/Password@123 …) followed by the real
+// frequency-ordered common-password base and common mutation rules, ~1000 entries.
+// Operators override/extend it via the wp_passwords corpus file.
+var wpTop1000Passwords = func() []string {
+	var out []string
+	sc := bufio.NewScanner(strings.NewReader(wpPasswordListRaw))
+	for sc.Scan() {
+		if p := strings.TrimSpace(sc.Text()); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return wpWeakPasswords
+	}
+	return out
+}()
 
 // wordpress_credaudit.go — OPT-IN WordPress weak-credential audit (module
 // wp_credaudit).
@@ -33,9 +56,10 @@ var wpWeakPasswords = []string{
 }
 
 const (
-	wpCredMaxUsers    = 5
-	wpCredMaxAttempts = 50
-	wpCredDelay       = 250 * time.Millisecond
+	wpCredMaxUsers    = 10   // enumerated users to spray (bounded)
+	wpCredMaxAttempts = 6000 // overall per-site guess cap (safety ceiling)
+	wpCredDelay       = 120 * time.Millisecond
+	wpCredBudget      = 20 * time.Minute // per-site wall-clock budget
 )
 
 // RunCredAudit implements wp_credaudit.
@@ -45,15 +69,18 @@ func (s *WordPressScanner) RunCredAudit(ctx context.Context, targetID string, lo
 		logFn("info", "wp_credaudit", "No confirmed WordPress host for this target; nothing to check.")
 		return ctx.Err()
 	}
-	authorized := s.cfg != nil && s.cfg.EnableWPCredentialAudit
+	// Authorized by EITHER the server-wide config switch OR an explicit per-scan
+	// authorization (the WP Scanner "weak-credential audit" tick, which the operator
+	// confirms before it is sent). Without either, no password is ever submitted.
+	authorized := (s.cfg != nil && s.cfg.EnableWPCredentialAudit) || wpCredAuthorizedFromContext(ctx)
 	if !authorized {
-		logFn("warn", "wp_credaudit", "Active credential testing is NOT authorized (set enable_wp_credential_audit=true to allow it). Skipping password attempts; the XML-RPC brute-force surface is reported by wp_endpoints.")
+		logFn("warn", "wp_credaudit", "Active credential testing is NOT authorized (tick the authorized weak-credential audit, or set enable_wp_credential_audit=true). Skipping password attempts; the XML-RPC brute-force surface is reported by wp_endpoints.")
 		return ctx.Err()
 	}
 
-	passwords := wpWeakPasswords
+	passwords := wpTop1000Passwords
 	if s.cfg != nil {
-		passwords = LoadCorpus(s.cfg.WordlistsDir, "wp_passwords", wpWeakPasswords)
+		passwords = LoadCorpus(s.cfg.WordlistsDir, "wp_passwords", wpTop1000Passwords)
 	}
 
 	hits := 0
@@ -76,14 +103,15 @@ func (s *WordPressScanner) RunCredAudit(ctx context.Context, targetID string, lo
 		if len(users) > wpCredMaxUsers {
 			users = users[:wpCredMaxUsers]
 		}
-		logFn("info", "wp_credaudit", "Authorized credential audit on "+site.URL+" over "+itoa(len(users))+" enumerated user(s) (rate-limited, XML-RPC-confirmed)...")
+		logFn("info", "wp_credaudit", "Authorized credential audit on "+site.URL+" over "+itoa(len(users))+" enumerated user(s) × "+itoa(len(passwords))+" passwords (rate-limited, XML-RPC-confirmed)...")
 
 		attempts := 0
+		started := time.Now()
 	userLoop:
 		for _, user := range users {
-			// Build this user's candidate list: the curated weak list + username itself.
+			// Build this user's candidate list: the username itself + the weak list.
 			for _, pw := range append([]string{user}, passwords...) {
-				if ctx.Err() != nil || attempts >= wpCredMaxAttempts {
+				if ctx.Err() != nil || attempts >= wpCredMaxAttempts || time.Since(started) > wpCredBudget {
 					break userLoop
 				}
 				attempts++

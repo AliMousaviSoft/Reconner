@@ -1564,9 +1564,10 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var modules []string
 	// Honor per-scan behavior options and build the executable phase list.
 	speed := scanner.SpeedNormal
-	subBrute := true        // slow permutation/brute phase of subdomain enum (default on)
-	asnDiscovery := false   // explicit opt-in only after program-scope/WHOIS verification
-	singleEndpoint := false // confine the whole scan to the seed URL(s) and paths under them
+	subBrute := true          // slow permutation/brute phase of subdomain enum (default on)
+	asnDiscovery := false     // explicit opt-in only after program-scope/WHOIS verification
+	singleEndpoint := false   // confine the whole scan to the seed URL(s) and paths under them
+	wpCredAuthorized := false // operator-confirmed authorization for the active WordPress credential audit
 	// prioritized: score every asset (main domain always first, then WAF/tech/
 	// panel/size signals) and run the full per-asset module group on the
 	// highest-value host before moving to the next, instead of sweeping one
@@ -1604,6 +1605,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			asnDiscovery = false
 		case "single_endpoint":
 			singleEndpoint = true
+		case "wp_cred_authorized":
+			wpCredAuthorized = true
 		case "network_fast":
 			networkProfile = scanner.NetworkFast
 		case "network_normal":
@@ -1618,6 +1621,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	ctx = scanner.WithSubdomainBrute(ctx, subBrute)
 	ctx = scanner.WithASNDiscovery(ctx, asnDiscovery)
 	ctx = scanner.WithNetworkProfile(ctx, networkProfile)
+	ctx = scanner.WithWPCredAuthorized(ctx, wpCredAuthorized)
 	// Single-endpoint mode: confine the pipeline to the seeded endpoint URL(s) and
 	// the paths under them. Also force the slow subdomain brute OFF (there is one
 	// host) and drop subdomain enumeration from the module list — the point is to

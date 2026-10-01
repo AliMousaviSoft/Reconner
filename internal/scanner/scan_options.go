@@ -84,6 +84,27 @@ func asnDiscoveryEnabled(ctx context.Context) bool {
 	return false
 }
 
+type wpCredAuthKey string
+
+const ctxWPCredAuth wpCredAuthKey = "wp_cred_authorized"
+
+// WithWPCredAuthorized marks THIS scan as explicitly authorized to run the active
+// WordPress weak-credential audit (module wp_credaudit). The WP Scanner UI sets it
+// from the operator's confirmed "weak-credential audit" tick. It is an alternative
+// to the server-wide enable_wp_credential_audit switch; without either, the audit
+// never submits a password.
+func WithWPCredAuthorized(ctx context.Context, authorized bool) context.Context {
+	return context.WithValue(ctx, ctxWPCredAuth, authorized)
+}
+
+// wpCredAuthorizedFromContext is fail-closed: a missing flag means NOT authorized.
+func wpCredAuthorizedFromContext(ctx context.Context) bool {
+	if v, ok := ctx.Value(ctxWPCredAuth).(bool); ok {
+		return v
+	}
+	return false
+}
+
 // ── Single-endpoint scan mode ────────────────────────────────────────────────
 //
 // When the operator scans a single URL and ticks "single endpoint", the whole
