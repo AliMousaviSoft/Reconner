@@ -1,10 +1,13 @@
 package scanner
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/projectdiscovery/cdncheck"
 )
@@ -51,23 +54,22 @@ func NormalizeNetworkScope(raw string) (string, error) {
 // ExpandNetworkScope returns unique addresses in stable order. The hard bound
 // prevents a typo such as /8 from turning a single-server deployment into an
 // unbounded allocation or an accidental Internet-scale scan.
+//
+// A token that isn't a literal IP/CIDR/range (the Network Scanner's primary
+// input shapes) falls back to a bounded DNS resolution when it's shaped like a
+// hostname — the operator's asset is very often a domain, not its IP, and
+// requiring them to resolve it by hand before pasting it in is needless
+// friction. Every resolved address still goes through the caller's normal
+// CDN/WAF exclusion (FilterCDNWAF) before anything is probed, so a domain that
+// resolves to a CDN/WAF edge is excluded exactly like a pasted CDN IP would be
+// — only a real origin address, reached by name or by IP, is ever scanned.
 func ExpandNetworkScope(raw string, maxHosts int) ([]net.IP, error) {
 	if maxHosts <= 0 || maxHosts > MaxNetworkScopeHosts {
 		maxHosts = MaxNetworkScopeHosts
 	}
 	seen := map[netip.Addr]bool{}
 	out := make([]net.IP, 0)
-	for _, token := range strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
-	}) {
-		canonical, err := NormalizeNetworkScope(token)
-		if err != nil {
-			return nil, err
-		}
-		addrs, err := expandNetworkToken(canonical, maxHosts-len(out))
-		if err != nil {
-			return nil, err
-		}
+	appendAddrs := func(addrs []netip.Addr) error {
 		for _, addr := range addrs {
 			if seen[addr] {
 				continue
@@ -75,12 +77,81 @@ func ExpandNetworkScope(raw string, maxHosts int) ([]net.IP, error) {
 			seen[addr] = true
 			out = append(out, net.IP(addr.AsSlice()))
 			if len(out) > maxHosts {
-				return nil, fmt.Errorf("network scope exceeds the %d-host safety limit", maxHosts)
+				return fmt.Errorf("network scope exceeds the %d-host safety limit", maxHosts)
 			}
+		}
+		return nil
+	}
+	for _, token := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	}) {
+		canonical, err := NormalizeNetworkScope(token)
+		if err != nil {
+			// A malformed IP/CIDR/range (reversed range, bad mask, ...) is
+			// all digits/dots/hyphens/slashes — never a letter — so it can
+			// never legitimately be a hostname either; surfacing the original,
+			// more specific error beats a confusing "could not be resolved"
+			// after wasting a DNS timeout on it.
+			if !hostnamePattern.MatchString(token) || !hasLetter(token) {
+				return nil, err
+			}
+			addrs, resolveErr := resolveHostnameToIPs(token)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("%q is not an IP/CIDR/range and could not be resolved: %w", token, resolveErr)
+			}
+			if err := appendAddrs(addrs); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		addrs, err := expandNetworkToken(canonical, maxHosts-len(out))
+		if err != nil {
+			return nil, err
+		}
+		if err := appendAddrs(addrs); err != nil {
+			return nil, err
 		}
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("network scope contains no IP addresses")
+	}
+	return out, nil
+}
+
+// hostnamePattern accepts an RFC-1123-ish hostname (labels of letters/digits/
+// hyphens, dot-separated, no leading/trailing hyphen per label) — just enough
+// shape-checking to decide "worth a DNS lookup", not full validation; a bogus
+// value still fails cleanly when the lookup itself returns no addresses.
+var hostnamePattern = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
+
+func hasLetter(s string) bool {
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveHostnameToIPs resolves a hostname to its A/AAAA addresses with a
+// bounded timeout — this runs synchronously inside a scan-admission HTTP
+// request (scheduler.createTask) as well as at scan time, so a slow or
+// unresponsive resolver must not hang either path.
+func resolveHostnameToIPs(host string) ([]netip.Addr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]netip.Addr, 0, len(addrs))
+	for _, a := range addrs {
+		if ip, ok := netip.AddrFromSlice(a.IP); ok {
+			out = append(out, ip.Unmap())
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no addresses found")
 	}
 	return out, nil
 }

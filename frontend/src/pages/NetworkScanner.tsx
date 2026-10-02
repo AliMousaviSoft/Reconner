@@ -5,12 +5,15 @@ import { useUIStore } from '../store/ui'
 import { Button, Spinner, Badge, EmptyState, cn } from '../components/ui'
 import type { Target, NetworkService } from '../types'
 
-// The Network Scanner is a dedicated surface for IP/CIDR/range targets, mirroring
-// the WP Scanner: port/service discovery is heavy enough (naabu + nmap
-// fingerprinting, per-service nuclei, per-protocol credential audits) to warrant
-// its own project list and module picker, separate from the web scanner. Projects
-// created here get IP/CIDR/range scope, which the backend auto-classifies as a
-// network-kind target — no mixing with web modules is possible.
+// The Network Scanner is a dedicated surface for IP/CIDR/range (or domain)
+// targets, mirroring the WP Scanner: port/service discovery is heavy enough
+// (naabu + nmap fingerprinting, per-service nuclei, per-protocol credential
+// audits) to warrant its own project list and module picker, separate from the
+// web scanner. A domain entry is resolved to its address(es) at scan time
+// (scanner.ExpandNetworkScope) — the operator's asset is very often a domain,
+// not its IP — and every resolved/pasted address still goes through the normal
+// CDN/WAF exclusion before anything is probed, so scanning never lands on a
+// third-party edge instead of the real origin.
 const NET_TAG = 'network-scanner'
 
 type NetModule = { id: string; label: string; desc: string; required?: boolean; danger?: boolean; defaultOn: boolean }
@@ -126,7 +129,7 @@ export default function NetworkScanner() {
 
   const createProject = async () => {
     if (scopeTokens.length === 0) {
-      addToast('error', 'Enter at least one IP, CIDR or inclusive range (e.g. 192.168.1.1-192.168.1.10).')
+      addToast('error', 'Enter at least one IP, CIDR, inclusive range (e.g. 192.168.1.1-192.168.1.10), or domain.')
       return
     }
     if (!confirmCredAudit()) return
@@ -195,11 +198,11 @@ export default function NetworkScanner() {
               className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm" />
           </div>
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1">Scope <span className="font-normal normal-case text-text-muted/70">(one or many — IP, CIDR or inclusive range)</span></label>
+            <label className="block text-[11px] font-semibold uppercase tracking-wider text-text-muted mb-1">Scope <span className="font-normal normal-case text-text-muted/70">(one or many — IP, CIDR, inclusive range, or domain)</span></label>
             <textarea value={scopeText} onChange={e => setScopeText(e.target.value)} rows={3}
-              placeholder={'203.0.113.10\n10.0.0.0/24\n192.168.1.1-192.168.1.50'}
+              placeholder={'203.0.113.10\n10.0.0.0/24\n192.168.1.1-192.168.1.50\nexample.com'}
               className="w-full bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm font-mono resize-y" />
-            <p className="mt-1 text-[10px] text-text-muted">{scopeTokens.length} scope entr{scopeTokens.length === 1 ? 'y' : 'ies'}. Recognised CDN/WAF edge IPs are excluded before probing.</p>
+            <p className="mt-1 text-[10px] text-text-muted">{scopeTokens.length} scope entr{scopeTokens.length === 1 ? 'y' : 'ies'}. A domain is resolved to its IP at scan time. Recognised CDN/WAF edge addresses are excluded before probing.</p>
           </div>
         </div>
 

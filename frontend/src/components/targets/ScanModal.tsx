@@ -18,6 +18,24 @@ const PROFILE_MODULES: Record<string, string[]> = {
   standard: STANDARD_PROFILE,
   deep: SCAN_MODULES.filter(module => !module.automatic).map(module => module.id),
 }
+
+// isIPLiteralScope reports whether a single-value web scan scope (a plain
+// host, or a URL's hostname) is a literal IPv4/IPv6 address rather than a
+// domain name. A bare IP has no second domain-based asset waiting to pick up
+// backup/path discovery later — this one value IS the whole scope — so the
+// caller uses this to default straight to the Deep profile instead of Safe's
+// passive-only checks, which would otherwise silently skip backup/config
+// exposure and path discovery against it.
+export function isIPLiteralScope(scanScope: string): boolean {
+  const tokens = scanScope.trim().split(/[\s,;]+/).filter(Boolean)
+  if (tokens.length !== 1) return false
+  let host = tokens[0]
+  try {
+    const u = new URL(tokens[0])
+    if (u.protocol === 'http:' || u.protocol === 'https:') host = u.hostname.replace(/^\[|\]$/g, '') // URL.hostname keeps [] around an IPv6 literal
+  } catch { /* not a URL (no scheme) — the token itself is the host */ }
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || (host.includes(':') && /^[0-9a-fA-F:]+$/.test(host))
+}
 const SCAN_PROFILES: { id: string; label: string; sub: string }[] = [
   { id: 'safe', label: 'Safe', sub: 'Low-impact default' },
   { id: 'standard', label: 'Standard', sub: 'Focused validation' },
@@ -91,6 +109,10 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   const scanScope = (asset?.value || target.domain).trim()
   const scopeTokens = scanScope.split(/[\s,;]+/).filter(Boolean)
   const scopeIsURL = scopeTokens.length === 1 && /^https?:\/\/[^\s]+(?:\/[^\s]*|\?[^\s]*)/i.test(scanScope)
+  // A bare IP (no domain name) web scope defaults straight to Deep instead of
+  // Safe — see isIPLiteralScope — so backup/config-exposure and path
+  // discovery actually run against it instead of being silently skipped.
+  const scopeHostIsIPLiteral = isIPLiteralScope(scanScope)
   const [singleEndpoint, setSingleEndpoint] = useState(true)
   // Prioritized scanning is now the DEFAULT: score every discovered asset
   // (main domain always first, then WAF/tech/panel/size signals) and run the
@@ -120,8 +142,13 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   useEffect(() => {
     if (!open) return
     setIdorA(''); setIdorB('')
-    setSelected(new Set(SAFE_PROFILE))
-    setActiveProfile('safe')
+    if (scopeHostIsIPLiteral) {
+      setSelected(new Set(PROFILE_MODULES.deep))
+      setActiveProfile('deep')
+    } else {
+      setSelected(new Set(SAFE_PROFILE))
+      setActiveProfile('safe')
+    }
     setWebSpeed('normal')
     setSubBrute(true)
     setASNDiscovery(false)
@@ -321,6 +348,9 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
             ))}
 					{networkCapable && <button type="button" onClick={() => setNetworkMode(true)} className="flex flex-col items-start px-3 py-2 rounded-lg border border-border text-left text-text-secondary hover:text-text-primary hover:border-border-strong"><span className="text-xs font-semibold">Network Scan</span><span className="text-[10px] text-text-muted">Ports, banners &amp; services</span></button>}
           </div>
+          {scopeHostIsIPLiteral && activeProfile === 'deep' && (
+            <p className="mt-1.5 text-[10px] text-text-muted">No domain name here — defaulted to Deep so backup/config-exposure and path discovery actually run against this IP.</p>
+          )}
         </div>
 
         <div className="flex items-center justify-between">

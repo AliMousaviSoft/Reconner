@@ -435,6 +435,26 @@ func TestCreateTaskAdmitsExplicitNetworkPipelineOnly(t *testing.T) {
 	}
 }
 
+// TestCreateTaskAdmitsDomainScopedNetworkTarget guards the Network Scanner's
+// domain-input path: before ExpandNetworkScope learned to resolve a hostname
+// (network_scope.go), admission rejected ANY network task whose target.domain
+// was a plain hostname — scheduler.go's own admission check calls
+// scanner.ExpandNetworkScope directly, so this failed before the scan ever
+// reached network.Run(). The Network Scanner page never required the scope
+// to be an IP (NetworkScanner.tsx accepts whatever the operator types), so a
+// domain-scoped network project was created successfully and then failed
+// every single scan. "localhost" resolves via the hosts file / NSS, not a
+// live query, so this stays deterministic in CI.
+func TestCreateTaskAdmitsDomainScopedNetworkTarget(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, kind) VALUES ('net-domain-target','localhost','network')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateTask("net-domain-target", []string{ModuleNetwork, "network_fast"}, 1); err != nil {
+		t.Fatalf("domain-scoped network task was rejected: %v", err)
+	}
+}
+
 func TestSkippedParallelGroupIsFullyHandledForResume(t *testing.T) {
 	got := markModulesCompleted([]string{ModuleJSAnalysis}, []string{ModuleJSAnalysis, ModuleParamDiscovery})
 	if len(got) != 2 || got[0] != ModuleJSAnalysis || got[1] != ModuleParamDiscovery {

@@ -5,6 +5,16 @@ Scanner** (left nav → *Network Scanner*, route `/network-scanner`) — mirrori
 the WP Scanner's design: create a project from one or many IP/CIDR/inclusive-range
 scopes, verify everything, then run only the modules you pick.
 
+## Scope can be a domain, not just an IP
+
+A scope entry doesn't have to already be an IP — a plain domain is accepted too
+and resolved to its address(es) at scan time (`scanner.ExpandNetworkScope`). Every
+resolved address (exactly like a pasted IP) goes through the normal CDN/WAF
+exclusion below *before* anything is probed: if the domain's address is a
+recognised CDN/WAF edge, that address is skipped (never probed) and the operator
+is told why; if it's a real origin, the full module selection runs against it
+exactly as if that IP had been pasted directly.
+
 The whole family is held to the project motto: **0 false positives, 0 false
 negatives, fast and reliable**. Every service is confirmed before anything acts
 on it (nmap `-sV`, never a bare open port treated as a known service), and every
