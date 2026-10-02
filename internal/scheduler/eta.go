@@ -27,6 +27,8 @@ var moduleETASeconds = map[string]int{
 	"verify": 60, "monitor": 20,
 	"network_brute_ssh": 90, "network_brute_ftp": 60, "network_brute_mysql": 90,
 	"network_brute_postgres": 90, "network_brute_redis": 60,
+	"network_brute_rdp": 180, "network_brute_vnc": 150, "network_brute_telnet": 90,
+	"network_brute_smb": 150,
 }
 
 func moduleEst(m string) int {

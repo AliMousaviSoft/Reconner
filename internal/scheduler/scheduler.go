@@ -108,6 +108,12 @@ const (
 	ModuleNetworkBruteMySQL    = "network_brute_mysql"
 	ModuleNetworkBrutePostgres = "network_brute_postgres"
 	ModuleNetworkBruteRedis    = "network_brute_redis"
+	// Tool-backed (ncrack/hydra) credential audit for the four protocols a
+	// safe native implementation isn't feasible for. See network_brute_tools.go.
+	ModuleNetworkBruteRDP    = "network_brute_rdp"
+	ModuleNetworkBruteVNC    = "network_brute_vnc"
+	ModuleNetworkBruteTelnet = "network_brute_telnet"
+	ModuleNetworkBruteSMB    = "network_brute_smb"
 )
 
 var AllModules = []string{
@@ -692,7 +698,8 @@ func isNetworkModule(module string) bool {
 	switch module {
 	case ModuleNetwork, ModuleNetworkBrute, ModuleNetworkNucleiOnly, ModuleNetworkInitialAccess,
 		ModuleNetworkBruteSSH, ModuleNetworkBruteFTP, ModuleNetworkBruteMySQL,
-		ModuleNetworkBrutePostgres, ModuleNetworkBruteRedis:
+		ModuleNetworkBrutePostgres, ModuleNetworkBruteRedis,
+		ModuleNetworkBruteRDP, ModuleNetworkBruteVNC, ModuleNetworkBruteTelnet, ModuleNetworkBruteSMB:
 		return true
 	default:
 		return false
@@ -718,6 +725,7 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
 		ModuleNetworkBruteSSH, ModuleNetworkBruteFTP, ModuleNetworkBruteMySQL,
 		ModuleNetworkBrutePostgres, ModuleNetworkBruteRedis,
+		ModuleNetworkBruteRDP, ModuleNetworkBruteVNC, ModuleNetworkBruteTelnet, ModuleNetworkBruteSMB,
 		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports",
 		"network_fast", "network_normal", "network_deep",
 		// Per-scan WordPress credential-audit authorization token (sent by the WP
@@ -1281,6 +1289,11 @@ var expectedTools = []string{
 	"subzy",
 	// active verification
 	"sqlmap",
+	// network credential audit — RDP/VNC/Telnet/SMB (see network_brute.go).
+	// SSH/FTP/MySQL/PostgreSQL/Redis are proven natively (no external tool);
+	// hydra/ncrack cover the four protocols a safe, dependency-light native
+	// implementation isn't feasible for.
+	"hydra", "ncrack",
 	// dirsearch can also run through its Python module when no wrapper binary is
 	// present, so Python itself is part of the honest runtime inventory.
 	"python3",
@@ -2451,6 +2464,14 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.networkScanner.RunBrutePostgres(ctx, targetID, domain, logFn)
 	case ModuleNetworkBruteRedis:
 		return s.networkScanner.RunBruteRedis(ctx, targetID, domain, logFn)
+	case ModuleNetworkBruteRDP:
+		return s.networkScanner.RunBruteRDP(ctx, targetID, domain, logFn)
+	case ModuleNetworkBruteVNC:
+		return s.networkScanner.RunBruteVNC(ctx, targetID, domain, logFn)
+	case ModuleNetworkBruteTelnet:
+		return s.networkScanner.RunBruteTelnet(ctx, targetID, domain, logFn)
+	case ModuleNetworkBruteSMB:
+		return s.networkScanner.RunBruteSMB(ctx, targetID, domain, logFn)
 	case ModuleNetworkInitialAccess:
 		ips, expandErr := scanner.ExpandNetworkScope(domain, scanner.MaxNetworkScopeHosts)
 		if expandErr != nil {

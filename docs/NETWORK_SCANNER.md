@@ -41,6 +41,10 @@ credential-audit hit is confirmed by a definitive, protocol-level success signal
 | `network_brute_mysql` | MySQL credential audit (opt-in). | critical |
 | `network_brute_postgres` | PostgreSQL credential audit (opt-in). | critical |
 | `network_brute_redis` | Redis credential audit (opt-in). | critical |
+| `network_brute_rdp` | RDP credential audit (opt-in, ncrack-backed). | critical |
+| `network_brute_vnc` | VNC credential audit (opt-in, ncrack-backed). | critical |
+| `network_brute_telnet` | Telnet credential audit (opt-in, ncrack-backed). | critical |
+| `network_brute_smb` | SMB credential audit (opt-in, hydra-backed). | critical |
 
 Each module self-gates on the discovery result (every brute module only ever
 targets services *this scan's own* fingerprint pass already verified open and
@@ -93,22 +97,36 @@ weak-credential audit:
     target database, so reaching that specific error already proves the
     credential.
   - **Redis** — the server's own `+OK` reply to `AUTH`.
+  - **RDP / VNC / Telnet** (ncrack) — ncrack's own "discovered credentials"
+    report for that exact protocol. A full NTLM/CredSSP (RDP) or RFB (VNC)
+    handshake is too much correctness risk to hand-roll natively, so these
+    three are proven with ncrack, a purpose-built, widely audited
+    network-login cracker, instead — never a partially-correct native
+    implementation.
+  - **SMB** (hydra) — hydra's own canonical success line
+    (`[port][smb2] host: … login: … password: …`).
 - The working credential lands in the finding **payload** (the PoC, e.g. the
-  exact `ssh`/`mysql`/`redis-cli` replay command); the evidence line masks the
-  secret.
+  exact `ssh`/`mysql`/`redis-cli`/`ncrack`/`hydra` replay command); the
+  evidence line masks the secret.
 
-### Why RDP / VNC / Telnet / SMB are not included
+### RDP / VNC / Telnet / SMB: tool-backed, not native
 
-Those four are deliberately **out of scope** for credential testing. Proving a
-credential against RDP or SMB needs a full NTLM/CredSSP implementation; VNC
-needs a bounded-but-still-binary RFB challenge-response. Hand-rolling either
-without a battle-tested library is a real correctness risk under this
-project's zero-false-positive bar, and the obvious alternative — a dedicated
-brute-force tool (hydra/ncrack) — was **already evaluated and explicitly
-retired** earlier in this project's history (see the "retired/unused tool"
-guards in `tool_install_test.go` and `module_contracts_test.go`). Those
-services are still fully enumerated and fingerprinted by the `network` module;
-only guessing their credentials is excluded.
+Proving a credential against RDP or SMB needs a full NTLM/CredSSP handshake;
+VNC needs a bounded-but-still-binary RFB challenge-response. Hand-rolling
+either without a battle-tested library is a real correctness risk under this
+project's zero-false-positive bar — so instead of a partially-correct native
+implementation, these four are proven with two purpose-built, widely audited
+network-login crackers: **ncrack** (rdp/vnc/telnet) and **hydra** (smb). Both
+are optional external tools — every module degrades to `BlockedPhase` when its
+tool is unavailable, exactly like every other optional tool in Reconner — and
+both remain gated behind the same authorization, scoping and stop-on-first-hit
+discipline as every other credential-audit module. The password corpus fed to
+these four is capped at 200 entries (not the full 1000): RDP/SMB in particular
+commonly enforce real account-lockout policies, so a smaller, higher-signal
+subset is the responsible default on top of each tool's own per-target
+stop-on-first-hit behaviour (the underlying process is killed the instant a
+credential is confirmed, rather than left to exhaust every remaining
+combination).
 
 ## Custom wordlists
 

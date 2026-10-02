@@ -33,6 +33,14 @@ const NET_MODULES: NetModule[] = [
     desc: 'OPT-IN. Top-1000 passwords against verified PostgreSQL services, confirmed only by a successful (or post-auth) connection.' },
   { id: 'network_brute_redis', label: 'Redis credential audit', danger: true, defaultOn: false,
     desc: 'OPT-IN. Top-1000 passwords against verified Redis services, confirmed only by the server’s own +OK reply.' },
+  { id: 'network_brute_rdp', label: 'RDP credential audit', danger: true, defaultOn: false,
+    desc: 'OPT-IN. ncrack-backed, bounded password subset, against verified RDP services — confirmed only by ncrack’s own discovered-credential report.' },
+  { id: 'network_brute_vnc', label: 'VNC credential audit', danger: true, defaultOn: false,
+    desc: 'OPT-IN. ncrack-backed against verified VNC services — confirmed only by ncrack’s own discovered-credential report.' },
+  { id: 'network_brute_telnet', label: 'Telnet credential audit', danger: true, defaultOn: false,
+    desc: 'OPT-IN. ncrack-backed against verified Telnet services — confirmed only by ncrack’s own discovered-credential report.' },
+  { id: 'network_brute_smb', label: 'SMB credential audit', danger: true, defaultOn: false,
+    desc: 'OPT-IN. hydra-backed against verified SMB services — confirmed only by hydra’s own discovered-credential report.' },
 ]
 
 const PROFILES: { id: 'fast' | 'normal' | 'deep'; label: string; desc: string }[] = [
@@ -240,7 +248,7 @@ export default function NetworkScanner() {
             <div className="mt-2 rounded-lg border border-severity-high/40 bg-severity-high/[.07] p-3 text-[11px] leading-5 text-text-secondary">
               <b className="text-severity-high">Credential audit selected ({bruteSelected.length}).</b> On launch you'll confirm authorization, then Reconner sprays the
               top-1000 passwords against each protocol's verified service(s) only (rate-limited, stops on first hit per target, confirmed only by a definitive protocol-level signal — never a guess).
-              Use exclusively against targets you are explicitly authorized to test. RDP/VNC/Telnet/SMB credentials are never guessed — there is no way to prove them without a much riskier protocol implementation.
+              Use exclusively against targets you are explicitly authorized to test. SSH/FTP/MySQL/PostgreSQL/Redis are proven natively; RDP/VNC/Telnet are ncrack-backed and SMB is hydra-backed — all five share the same bounded, stop-on-first-hit discipline.
             </div>
           )}
         </div>

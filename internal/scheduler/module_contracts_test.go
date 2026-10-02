@@ -37,17 +37,23 @@ func TestEveryExecutableModuleHasV3ContractAndRegressionSuite(t *testing.T) {
 	}
 }
 
+// TestExpectedToolInventoryContainsOnlySupportedRuntimeDependencies pins the
+// tool roster. hydra and ncrack were reinstated (previously retired) to cover
+// RDP/VNC/Telnet/SMB credential-audit modules — the one class of protocol a
+// safe, dependency-light native Go implementation isn't feasible for; see
+// network_brute.go. uncover/dalfox/gowitness remain retired/unused.
 func TestExpectedToolInventoryContainsOnlySupportedRuntimeDependencies(t *testing.T) {
 	want := []string{
 		"subfinder", "assetfinder", "findomain", "scilla", "asnmap",
 		"puredns", "alterx", "shuffledns", "dnsx",
 		"httpx", "gau", "waybackurls", "waymore", "katana", "hakrawler", "uro",
-		"nuclei", "dirsearch", "feroxbuster", "naabu", "nmap", "subzy", "sqlmap", "python3",
+		"nuclei", "dirsearch", "feroxbuster", "naabu", "nmap", "subzy", "sqlmap",
+		"hydra", "ncrack", "python3",
 	}
 	if !slices.Equal(expectedTools, want) {
 		t.Fatalf("expected tool inventory drifted\n got: %v\nwant: %v", expectedTools, want)
 	}
-	for _, retired := range []string{"hydra", "uncover", "dalfox", "gowitness"} {
+	for _, retired := range []string{"uncover", "dalfox", "gowitness"} {
 		if slices.Contains(expectedTools, retired) {
 			t.Errorf("retired/unused tool %q is still advertised", retired)
 		}

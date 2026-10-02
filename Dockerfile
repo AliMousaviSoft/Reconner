@@ -311,6 +311,13 @@ LABEL org.opencontainers.image.title="Reconner" \
 #                    reproduced against a real nuclei binary while auditing this image.
 #   curl             image HEALTHCHECK
 #   tini             PID 1 — reaps zombie children the tool-chain spawns
+#   hydra            opt-in, authorization-gated SMB credential audit
+#                    (network_brute_smb) — see internal/scanner/network_brute.go.
+#   ncrack           opt-in, authorization-gated RDP/VNC/Telnet credential audit
+#                    (network_brute_rdp/vnc/telnet) — same module file. Both are
+#                    pure network-login crackers, never invoked unless the
+#                    operator explicitly authorizes active credential testing
+#                    for that scan.
 RUN apt-get update \
  && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends \
@@ -319,6 +326,8 @@ RUN apt-get update \
       nmap \
       libcap2-bin \
       sqlmap \
+      hydra \
+      ncrack \
       python3 \
       git \
       curl \
@@ -387,14 +396,14 @@ ENV HOME=/home/reconner \
 # command is run for real. A missing or broken tool fails the Docker build,
 # never ships silently.
 RUN gosu reconner:reconner sh -c 'set -eu; \
-    echo "==> verifying all 25 required tools, plus Chromium and git, are on PATH"; \
+    echo "==> verifying all 27 required tools, plus Chromium and git, are on PATH"; \
     MISSING=""; \
     for t in \
       subfinder httpx nuclei katana dnsx alterx asnmap naabu shuffledns \
       gau waybackurls assetfinder hakrawler subzy puredns scilla \
       dirsearch feroxbuster findomain sqlmap uro waymore \
       massdns python3 \
-      chromium git nmap \
+      chromium git nmap hydra ncrack \
     ; do \
       if ! command -v "$t" >/dev/null 2>&1; then \
         MISSING="${MISSING} $t"; \
@@ -415,6 +424,8 @@ RUN gosu reconner:reconner sh -c 'set -eu; \
     nuclei -version; \
     naabu -version; \
     nmap --version | head -1; \
+    hydra -h 2>&1 | head -1 || true; \
+    ncrack --version 2>&1 | head -1 || true; \
     httpx -version; \
     subfinder -version; \
     katana -version; \

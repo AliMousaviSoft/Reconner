@@ -64,6 +64,8 @@ var toolCatalog = map[string]toolSpec{
 	"sqlmap":  {methodApt, "sqlmap", "https://github.com/sqlmapproject/sqlmap", "Or: pip install --user sqlmap-dev / git clone."},
 	"python3": {methodApt, "python3", "https://www.python.org", ""},
 	"nmap":    {methodApt, "nmap", "https://nmap.org", "Service detection works unprivileged; OS detection also needs NET_RAW/NET_ADMIN."},
+	"hydra":   {methodApt, "hydra", "https://github.com/vanhauser-thc/thc-hydra", "Used only for the opt-in, authorization-gated SMB credential audit (network_brute_smb)."},
+	"ncrack":  {methodApt, "ncrack", "https://nmap.org/ncrack/", "Used only for the opt-in, authorization-gated RDP/VNC/Telnet credential audit (network_brute_rdp/vnc/telnet)."},
 
 	// ── manual (prebuilt binary / distro-specific) ──
 	"findomain":   {methodManual, "", "https://github.com/Findomain/Findomain/releases", "Download the prebuilt binary and put it on PATH."},

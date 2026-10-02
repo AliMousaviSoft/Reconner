@@ -401,6 +401,7 @@ func TestResumeWithOnlyNetworkBruteModuleRemainingIsAdmitted(t *testing.T) {
 	for _, module := range []string{
 		ModuleNetworkBruteSSH, ModuleNetworkBruteFTP, ModuleNetworkBruteMySQL,
 		ModuleNetworkBrutePostgres, ModuleNetworkBruteRedis,
+		ModuleNetworkBruteRDP, ModuleNetworkBruteVNC, ModuleNetworkBruteTelnet, ModuleNetworkBruteSMB,
 	} {
 		if _, err := s.CreateTask("net-resume-target", []string{module}, 1); err != nil {
 			t.Errorf("module %q alone (the post-resume shape) was rejected: %v", module, err)

@@ -153,6 +153,10 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
 			{ id: 'network_brute_mysql', label: 'MySQL credential audit', danger: true, desc: 'Top-1000 passwords against verified MySQL services. Confirmed only by a successful connection.' },
 			{ id: 'network_brute_postgres', label: 'PostgreSQL credential audit', danger: true, desc: 'Top-1000 passwords against verified PostgreSQL services. Confirmed only by a successful/post-auth connection.' },
 			{ id: 'network_brute_redis', label: 'Redis credential audit', danger: true, desc: 'Top-1000 passwords against verified Redis services. Confirmed only by the server’s own +OK reply.' },
+			{ id: 'network_brute_rdp', label: 'RDP credential audit', danger: true, desc: 'ncrack-backed (bounded password subset) against verified RDP services. Confirmed only by ncrack’s own discovered-credential report.' },
+			{ id: 'network_brute_vnc', label: 'VNC credential audit', danger: true, desc: 'ncrack-backed against verified VNC services. Confirmed only by ncrack’s own discovered-credential report.' },
+			{ id: 'network_brute_telnet', label: 'Telnet credential audit', danger: true, desc: 'ncrack-backed against verified Telnet services. Confirmed only by ncrack’s own discovered-credential report.' },
+			{ id: 'network_brute_smb', label: 'SMB credential audit', danger: true, desc: 'hydra-backed against verified SMB services. Confirmed only by hydra’s own discovered-credential report.' },
 		]
 		const bruteIds = networkDefs.filter(m => m.danger).map(m => m.id)
 		const applyNetworkProfile = (profile: 'fast' | 'normal' | 'deep') => {
