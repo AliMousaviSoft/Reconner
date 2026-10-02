@@ -203,6 +203,53 @@ func TestWordPressDetectionGateConfirms(t *testing.T) {
 	}
 }
 
+// TestWordPressGateConfirmsHardenedViaXMLRPC proves the recall booster: a site
+// that has STRIPPED the wp/v2 REST namespace and RENAMED/BLOCKED wp-login.php is
+// still confirmed from the WordPress-only XML-RPC methods alone (never miss).
+func TestWordPressGateConfirmsHardenedViaXMLRPC(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		// No generator, no REST link header, no wp asset paths — a hardened theme.
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Blog</title></head><body>welcome</body></html>`))
+	})
+	// REST namespace stripped.
+	mux.HandleFunc("/wp-json/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"Blog","namespaces":[]}`))
+	})
+	// Login path blocked.
+	mux.HandleFunc("/wp-login.php", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+	// XML-RPC still answers and advertises WordPress-only methods.
+	mux.HandleFunc("/xmlrpc.php", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><params><param><value><array><data>
+<value><string>wp.getUsersBlogs</string></value>
+<value><string>wp.getProfile</string></value>
+</data></array></value></param></params></methodResponse>`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t)
+	addHTTPService(t, db, tid, srv.URL+"/")
+
+	sites := s.ensureDetected(context.Background(), tid, noLog)
+	if len(sites) != 1 || !sites[0].isWordPress() {
+		t.Fatalf("hardened WordPress (xmlrpc-only) must still be confirmed: %+v", sites)
+	}
+	var signals string
+	db.QueryRow(`SELECT signals FROM wp_sites WHERE target_id=?`, tid).Scan(&signals)
+	if !strings.Contains(signals, "xmlrpc-wp-methods") {
+		t.Errorf("expected xmlrpc-wp-methods signal, got %q", signals)
+	}
+}
+
 func TestWordPressGateRejectsNonWordPress(t *testing.T) {
 	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")

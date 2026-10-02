@@ -308,6 +308,21 @@ func (s *WordPressScanner) detectOne(ctx context.Context, base string) wpSite {
 		if strings.Contains(strings.ToLower(home.linkHdr), "api.w.org") {
 			add(55, "rest-link-header")
 		}
+		low := strings.ToLower(home.body)
+		// wlwmanifest link points at /wp-includes/wlwmanifest.xml — a core file no
+		// other platform ships; strong corroboration that survives REST being hidden.
+		if strings.Contains(low, "wlwmanifest") && strings.Contains(low, "wp-includes") {
+			add(60, "wlwmanifest-link")
+		}
+		// oEmbed discovery via the WordPress REST oembed route.
+		if strings.Contains(low, "oembed/1.0/embed") || strings.Contains(low, "/wp-json/oembed/") {
+			add(45, "oembed-discovery")
+		}
+		// RSD/EditURI pointing at xmlrpc.php?rsd — the WordPress Really Simple
+		// Discovery link.
+		if strings.Contains(low, "xmlrpc.php?rsd") {
+			add(40, "rsd-link")
+		}
 	}
 
 	// (2) REST API root — the wp/v2 namespace is essentially WordPress-unique.
@@ -351,6 +366,20 @@ func (s *WordPressScanner) detectOne(ctx context.Context, base string) wpSite {
 	if a := wpGet(ctx, base+"/?author=1", 8*1024); (a.status == 301 || a.status == 302) &&
 		wpAuthorPathRe.MatchString(a.location) {
 		add(50, "author-redirect")
+	}
+
+	// (7) XML-RPC WordPress methods — a last-resort, bar-clearing signal that
+	// catches hardened installs where the REST namespace is stripped and the login
+	// path is renamed/blocked. wp.getUsersBlogs / wp.getProfile are WordPress-only
+	// XML-RPC method names, so advertising them is definitive (zero FP). Skipped
+	// once the site is already confirmed, to avoid an extra request per host.
+	if site.Confidence < ConfEvidence {
+		if x := wpPost(ctx, base+"/xmlrpc.php", "text/xml", xmlrpcListMethods, 64*1024); x.status == 200 &&
+			strings.Contains(x.body, "<methodResponse") &&
+			(strings.Contains(x.body, "wp.getUsersBlogs") || strings.Contains(x.body, "wp.getProfile") ||
+				strings.Contains(x.body, "blogger.getUsersBlogs")) {
+			add(90, "xmlrpc-wp-methods")
+		}
 	}
 
 	return site

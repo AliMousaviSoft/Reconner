@@ -22,11 +22,15 @@ WordPress-unique signal:
 - the genuine **`wp-login.php` credential form** (the `log` + `pwd` fields plus a
   WordPress marker),
 
-corroborated by weaker signals (meta generator, enqueued `/wp-content/` &
-`/wp-includes/` asset refs, the `api.w.org` REST link header, the
-`/?author=1 → /author/<slug>/` redirect, `readme.html`, the feed generator). A
-soft-404 baseline guards every HTML signal so a catch-all "200 for everything"
-host can never be mistaken for WordPress.
+or the live **XML-RPC endpoint advertising WordPress-only methods**
+(`wp.getUsersBlogs` / `wp.getProfile` — a last-resort signal that catches
+hardened installs where the REST namespace is stripped and the login path is
+renamed/blocked), corroborated by weaker signals (meta generator, enqueued
+`/wp-content/` & `/wp-includes/` asset refs, the `api.w.org` REST link header,
+the `wlwmanifest`/oembed/RSD discovery links, the `/?author=1 → /author/<slug>/`
+redirect, `readme.html`, the feed generator). A soft-404 baseline guards every
+HTML signal so a catch-all "200 for everything" host can never be mistaken for
+WordPress.
 
 A domain the operator enters that turns out NOT to be WordPress simply yields an
 empty confirmed-site list, so every other WP module no-ops on it. **That is what
@@ -45,7 +49,7 @@ crawls each and the page shows exactly which entered the WordPress pipeline
 | `wp_users` | Usernames WordPress itself returns (REST users route, author-archive redirect, oembed). | low–medium |
 | `wp_config` | wp-config backups/swaps/source and `debug.log` — reported only when the body carries the real config source / PHP error log; directory listings on sensitive dirs. | medium–critical |
 | `wp_backups` | Public/plugin backup archives (UpdraftPlus, All-in-One WP Migration, Duplicator, BackupBuddy, WPvivid, BackWPup, Snapshot, …) and installers — magic-byte confirmed. | high–critical |
-| `wp_endpoints` | Login panel, REST root, admin-ajax, and XML-RPC capabilities (`system.multicall` amplification, `pingback.ping` SSRF/DDoS) read from the server's own `system.listMethods`. | info–medium |
+| `wp_endpoints` | Login panel, REST root, admin-ajax, and **proof-gated** XML-RPC capabilities (see below). | info–critical |
 | `wp_misconfig` | Reinstallable site (`install.php` / `setup-config.php` wizard), open registration, `WP_DEBUG` display — each content-confirmed. | low–critical |
 | `wp_vulns` | WordPress-tagged nuclei corpus (embedded FP-safe pack + official templates) against confirmed hosts only. | medium+ |
 | `wp_credaudit` | **Opt-in** weak-credential audit (see below). | critical |
@@ -63,13 +67,43 @@ cached), so they are safe to run in any order and independently.
   `define(` (or the AUTH/SECRET salts, or a `b0VIM` swap); a backup archive only
   after its bytes are magic-confirmed (ZIP/GZIP/TAR/SQL/7z/…​ or the `.wpress`
   header); a directory listing only on a genuine autoindex.
-- **Endpoints / misconfig**: XML-RPC capabilities are read from the server's own
-  method list; a reinstallable site is confirmed by the setup wizard markers (and
-  excluded when the page says "already installed").
+- **Endpoints / misconfig**: a reinstallable site is confirmed by the setup
+  wizard markers (and excluded when the page says "already installed").
 - **CVE coverage** (`wp_vulns`): the embedded pack is FP-safe **by construction**
   — a build-breaking test (`nuclei_pack_test.go`) requires every template to be
   medium+ with a status gate plus a strong/multi-word-AND signature; the official
   corpus runs under the same medium+ floor and runtime noise/reflection guards.
+
+### XML-RPC is proof-gated, never advertised
+
+`xmlrpc.php` being live is an honest **low** (`wordpress_xmlrpc_enabled`). Its two
+dangerous capabilities are reported **only when actually demonstrated on the
+host**, never from the `system.listMethods` advertisement:
+
+- **`wordpress_xmlrpc_pingback`** (SSRF reflector): the scanner plants an
+  out-of-band probe and induces `pingback.ping` to fetch our callback URL as the
+  pingback *source* (aimed at a real post discovered via REST, falling back to the
+  site root). It is reported **only if the target server actually calls back** —
+  the OAST handler records the server's **egress source IP** and promotes a
+  confirmed finding. No OOB endpoint configured, or no callback caught: no finding.
+- **`wordpress_xmlrpc_multicall`** (brute-force amplifier): the scanner batches
+  several `wp.getUsersBlogs` calls (throwaway bogus creds) into one
+  `system.multicall` and reports **only if the host executed each sub-call** (a
+  per-element fault for every entry) — the exact amplification primitive. A host
+  that blocks batched auth-amplification (4.4+ hardening / a security plugin) is
+  not reported. Three fixed bogus guesses in one request are a capability probe,
+  far below any lockout threshold.
+
+### Curated always-on exploit templates
+
+Alongside the official corpus, the embedded pack ships zero-FP WordPress exploit
+templates whose match requires unambiguous proof (real `wp-config.php` contents,
+a dump-specific marker triple, or an echoed RCE marker): Duplicator
+`duplicator_download` traversal (CVE-2020-11738), Slider Revolution
+`revslider_show_image` traversal, exposed SQL dumps, and Bricks Builder unauth RCE
+(CVE-2024-25600, proven by executing a benign marker command). On a host without
+`git`, the full official WordPress CVE corpus is provisioned via nuclei's own
+updater so `wp_vulns` always has the complete template set.
 
 ## Opt-in weak-credential audit (`wp_credaudit`)
 
