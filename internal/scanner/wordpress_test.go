@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -99,6 +100,25 @@ func fakeWordPress() http.Handler {
 <value><string>pingback.ping</string></value>
 <value><string>wp.getUsersBlogs</string></value>
 </data></array></value></param></params></methodResponse>`))
+		case strings.Contains(body, "system.multicall"):
+			// Amplifiable host: each batched sub-call is executed and returns its OWN
+			// fault (three faults in one response) — the per-element execution the
+			// multicall proof requires. Must precede the wp.getUsersBlogs case.
+			fault := `<value><struct><member><name>faultCode</name><value><int>403</int></value></member>` +
+				`<member><name>faultString</name><value><string>Incorrect username or password.</string></value></member></struct></value>`
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><params><param><value><array><data>` +
+				fault + fault + fault +
+				`</data></array></value></param></params></methodResponse>`))
+		case strings.Contains(body, "pingback.ping"):
+			// Simulate the SSRF: synchronously fetch the SOURCE URI the caller asked us
+			// to "verify" (our OOB callback) before answering, so the proof is recorded
+			// by the time the pingback POST returns.
+			if m := regexp.MustCompile(`<string>(https?://[^<]+)</string>`).FindStringSubmatch(body); m != nil {
+				if resp, err := http.Get(m[1]); err == nil {
+					_ = resp.Body.Close()
+				}
+			}
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><params><param><value><string>pong</string></value></param></params></methodResponse>`))
 		case strings.Contains(body, "wp.getUsersBlogs"):
 			// Accept any username==password (a weak credential) — mirrors the audit's
 			// first guess (pw = username) so the success path is confirmed quickly.
@@ -335,12 +355,124 @@ func TestWordPressEndpointsXMLRPC(t *testing.T) {
 	if err := s.RunEndpoints(context.Background(), tid, noLog); err != nil {
 		t.Fatal(err)
 	}
-	for _, typ := range []string{"wordpress_xmlrpc_enabled", "wordpress_xmlrpc_pingback", "wordpress_xmlrpc_multicall", "wordpress_login_panel"} {
+	// Honest availability, the login panel, and the PROVEN multicall amplification
+	// (the fake host executes each batched sub-call) must all be reported. Pingback
+	// is proof-gated on an OOB callback and is covered by its own test below.
+	for _, typ := range []string{"wordpress_xmlrpc_enabled", "wordpress_xmlrpc_multicall", "wordpress_login_panel"} {
 		var n int
 		db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type=?`, tid, typ).Scan(&n)
 		if n == 0 {
 			t.Errorf("endpoint finding %q missing", typ)
 		}
+	}
+	// With no OOB callback configured, pingback.ping is advertised but UNPROVEN —
+	// it must NOT be reported (zero false positives).
+	var pb int
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_xmlrpc_pingback'`, tid).Scan(&pb)
+	if pb != 0 {
+		t.Error("pingback must not be reported without a caught OOB callback (advertisement alone is not proof)")
+	}
+}
+
+// TestWordPressPingbackSSRFProof confirms pingback is reported ONLY on a real
+// out-of-band callback, and that the server's egress Source IP is captured. The
+// callback endpoint mimics the production OAST handler (RecordOOBHit): it records
+// the hit on the probe and raises the confirmed finding.
+func TestWordPressPingbackSSRFProof(t *testing.T) {
+	srv := httptest.NewServer(fakeWordPress())
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t)
+	addHTTPService(t, db, tid, srv.URL+"/")
+
+	const egressIP = "203.0.113.42"
+	callback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := path.Base(r.URL.Path)
+		ev := "Out-of-band wordpress_xmlrpc_pingback confirmed: the target server called back via /oob/" + token +
+			". Injected via " + srv.URL + "/xmlrpc.php (sink: xmlrpc:pingback.ping). Source IP: " + egressIP + " | method: GET | UA: WordPress/pingback"
+		_, _ = db.Exec(`UPDATE oob_probes SET hit_count=hit_count+1, evidence=? WHERE token=?`, ev, token)
+		_, _ = RecordDetectorObservation(context.Background(), db, DetectorObservation{
+			TargetID: tid, Type: "wordpress_xmlrpc_pingback", Subtype: "wordpress_pingback", Severity: "critical",
+			URL: srv.URL + "/xmlrpc.php", Method: "CALLBACK", Location: "xmlrpc:pingback.ping",
+			Evidence: ev, Source: "oast-callback", Confidence: 100, Verdict: VerifyVerified,
+		})
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer callback.Close()
+	s.cfg.BlindXSSCallbackURL = callback.URL
+
+	if err := s.RunEndpoints(context.Background(), tid, noLog); err != nil {
+		t.Fatal(err)
+	}
+
+	var pb int
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_xmlrpc_pingback'`, tid).Scan(&pb)
+	if pb == 0 {
+		t.Fatal("a caught pingback OOB callback must raise the wordpress_xmlrpc_pingback finding")
+	}
+	// The egress Source IP must have been recorded on the probe evidence.
+	var ev string
+	db.QueryRow(`SELECT COALESCE(evidence,'') FROM oob_probes WHERE kind='wordpress_pingback' AND target_id=?`, tid).Scan(&ev)
+	if parseOOBSourceIP(ev) != egressIP {
+		t.Errorf("egress source IP not captured from pingback callback: evidence=%q parsed=%q", ev, parseOOBSourceIP(ev))
+	}
+}
+
+// TestWordPressMulticallBlockedNotReported confirms a host that blocks multicall
+// auth-amplification (single fault, not per-element) is NOT reported.
+func TestWordPressMulticallBlockedNotReported(t *testing.T) {
+	mux := http.NewServeMux()
+	// Minimal WP surface the detection gate needs.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Link", `<https://ex.test/wp-json/>; rel="https://api.w.org/"`)
+		_, _ = w.Write([]byte(`<!doctype html><html><head><meta name="generator" content="WordPress 6.4.2" /></head><body>hi</body></html>`))
+	})
+	mux.HandleFunc("/wp-json/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"Ex","namespaces":["oembed/1.0","wp/v2"]}`))
+	})
+	mux.HandleFunc("/wp-login.php", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Set-Cookie", "wordpress_test_cookie=WP+Cookie+check")
+		_, _ = w.Write([]byte(`<form name="loginform" action="/wp-login.php"><input name="log" id="user_login"><input name="pwd" id="user_pass" type="password"><input type="submit" id="wp-submit"></form>`))
+	})
+	mux.HandleFunc("/xmlrpc.php", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/xml")
+		switch {
+		case strings.Contains(string(b), "system.listMethods"):
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><params><param><value><array><data><value><string>system.multicall</string></value></data></array></value></param></params></methodResponse>`))
+		default:
+			// Hardened: a single top-level fault, NOT per-element execution.
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>405</int></value></member><member><name>faultString</name><value><string>XML-RPC services are disabled.</string></value></member></struct></value></fault></methodResponse>`))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	s, db, tid := newWPTestScanner(t)
+	addHTTPService(t, db, tid, srv.URL+"/")
+
+	if err := s.RunEndpoints(context.Background(), tid, noLog); err != nil {
+		t.Fatal(err)
+	}
+	var mc int
+	db.QueryRow(`SELECT COUNT(*) FROM vuln_findings WHERE target_id=? AND type='wordpress_xmlrpc_multicall'`, tid).Scan(&mc)
+	if mc != 0 {
+		t.Error("multicall must not be reported when the host blocks batched auth-amplification (single fault)")
+	}
+}
+
+func TestParseOOBSourceIP(t *testing.T) {
+	ev := "Out-of-band blind_ssrf confirmed: the target server called back via /oob/x. Injected via http://h/y (sink: s). Source IP: 198.51.100.7 | method: GET | UA: curl"
+	if got := parseOOBSourceIP(ev); got != "198.51.100.7" {
+		t.Errorf("parseOOBSourceIP = %q want 198.51.100.7", got)
+	}
+	if got := parseOOBSourceIP("no marker here"); got != "unknown" {
+		t.Errorf("parseOOBSourceIP(no marker) = %q want unknown", got)
 	}
 }
 

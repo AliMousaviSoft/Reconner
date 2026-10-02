@@ -41,6 +41,8 @@ func oobVulnType(kind string) string {
 		return "insecure_deserialization"
 	case "file_upload_ssrf", "file_upload_xxe":
 		return "file_upload"
+	case "wordpress_pingback":
+		return "wordpress_xmlrpc_pingback"
 	}
 	return "blind_ssrf"
 }
