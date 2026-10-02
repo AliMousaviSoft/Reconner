@@ -17,32 +17,73 @@ const isScannableProjectAsset = (asset: Asset) =>
 	(asset.kind === 'web' && ['domain', 'wildcard', 'url', 'page', 'js', 'api'].includes(asset.asset_type || 'domain')) ||
 	(asset.kind === 'network' && ['ip', 'cidr'].includes(asset.asset_type || 'ip'))
 
+// Projects created from the WP Scanner page carry this tag (see WPScanner.tsx) —
+// the same signal used there to decide this is a WordPress project, reused here
+// to decide this project's detail page should show WordPress-specific tabs.
+const WP_TAG = 'wp-scanner'
+
 // Findings information architecture — a logical hierarchy instead of a flat row
 // of unrelated siblings. Assets = the discovered surface; Vulnerabilities = the
 // working area (Confirmed vs Needs-Review first, then by check type); Activity =
 // change monitoring.
-const TAB_GROUPS = [
-  { group: 'Assets', tabs: [
-    { id: 'subdomains', label: 'Hosts' },
-    { id: 'http', label: 'URLs' },
-    { id: 'js', label: 'Scripts' },
-    { id: 'params', label: 'Parameters' },
-    { id: 'dirs', label: 'Directories' },
-    { id: 'admin-panels', label: 'Admin & sensitive panels' },
-		{ id: 'network-services', label: 'Network services' },
-  ] },
-  { group: 'Vulnerabilities', tabs: [
-    { id: 'vulns', label: 'Confirmed' },
-    { id: 'candidates', label: 'Needs Review' },
-    { id: 'redirects', label: 'Open Redirects' },
-    { id: 'nuclei', label: 'Nuclei' },
-    { id: 'js-findings', label: 'JS / Secrets' },
-    { id: 'backups', label: 'Exposed Files' },
-  ] },
-  { group: 'Activity', tabs: [
-    { id: 'monitor', label: 'Changes' },
-  ] },
+//
+// This layout is NOT one-size-fits-all: a pure network (IP/CIDR) project never
+// populates the web-crawl tabs (Hosts/Scripts/Parameters/Directories/Admin
+// panels/Open Redirects/JS-Secrets/Exposed Files — nothing in the network
+// pipeline writes to those tables), so showing them is empty clutter, not
+// information. A WordPress project additionally gets its own group for the
+// inventory/enumeration data (plugins, themes, core version, usernames,
+// endpoints) that wp_enum/wp_users/wp_endpoints record — those are confirmed
+// FACTS about the install, not "needs review" vulnerability candidates, so
+// they're pulled out of the generic Vulnerabilities tabs into a dedicated,
+// clearly-labeled place instead of being indistinguishable noise next to a
+// real XSS/SQLi candidate.
+const WEB_ASSET_TABS = [
+  { id: 'subdomains', label: 'Hosts', desc: 'Subdomains discovered for this project, with liveness, IP and page title.' },
+  { id: 'http', label: 'URLs', desc: 'Every HTTP(S) endpoint probed, with status code, title and response size.' },
+  { id: 'js', label: 'Scripts', desc: 'JavaScript files collected from the crawl.' },
+  { id: 'params', label: 'Parameters', desc: 'Request parameters discovered (query, form, JSON body) and whether they reflect.' },
+  { id: 'dirs', label: 'Directories', desc: 'Paths found via directory/content discovery.' },
+  { id: 'admin-panels', label: 'Admin & sensitive panels', desc: 'Login/admin panels and other sensitive management interfaces fingerprinted on the surface.' },
 ]
+const VULN_TABS = [
+  { id: 'vulns', label: 'Confirmed', desc: 'Verified exploitable vulnerabilities — each with a reproduction PoC.' },
+  { id: 'candidates', label: 'Needs Review', desc: 'Lower-confidence signals that need a human look before being confirmed or dismissed.' },
+  { id: 'redirects', label: 'Open Redirects', desc: 'Confirmed open-redirect endpoints.' },
+  { id: 'nuclei', label: 'Nuclei', desc: 'Matches from the nuclei template engine (medium severity and up).' },
+  { id: 'js-findings', label: 'JS / Secrets', desc: 'Credentials, API keys and other secrets found in client-side JavaScript.' },
+  { id: 'backups', label: 'Exposed Files', desc: 'Publicly exposed backups, dumps and config files.' },
+]
+const WP_TABS = [
+  { id: 'wp-inventory', label: 'Plugins & Themes', desc: 'Core version, plugins and themes — each confirmed from the site’s own assets/readme, never guessed. Cross-check versions against CVE advisories.' },
+  { id: 'wp-users', label: 'Users', desc: 'Usernames WordPress itself discloses (REST users route, author-archive redirect, oembed) — pre-exploitation recon for targeted login/XML-RPC attacks.' },
+  { id: 'wp-endpoints', label: 'Endpoints', desc: 'Login page, REST API root, admin-ajax and XML-RPC — the surfaces every other WordPress check builds on.' },
+]
+export function tabGroupsFor(isNetwork: boolean, isWordPress: boolean) {
+  if (isNetwork) {
+    return [
+      { group: 'Assets', tabs: [{ id: 'network-services', label: 'Network services', desc: 'Every open port nmap/naabu verified, with service, product/version and banner.' }] },
+      { group: 'Vulnerabilities', tabs: VULN_TABS.filter(t => ['vulns', 'candidates', 'nuclei'].includes(t.id)) },
+      { group: 'Activity', tabs: [{ id: 'monitor', label: 'Changes', desc: 'Changes detected by automated monitoring re-scans.' }] },
+    ]
+  }
+  const groups = [
+    { group: 'Assets', tabs: WEB_ASSET_TABS },
+    ...(isWordPress ? [{ group: 'WordPress', tabs: WP_TABS }] : []),
+    { group: 'Vulnerabilities', tabs: VULN_TABS },
+    { group: 'Activity', tabs: [{ id: 'monitor', label: 'Changes', desc: 'Changes detected by automated monitoring re-scans.' }] },
+  ]
+  return groups
+}
+
+// WordPress inventory/recon facts recorded through the generic finding pipeline
+// (wp_enum/wp_users/wp_endpoints) — confirmed information about the install,
+// not vulnerability candidates, so they're broken out into the WordPress tabs
+// above instead of cluttering Confirmed/Needs Review.
+const WP_INVENTORY_TYPES = new Set(['wordpress_version', 'wordpress_plugin', 'wordpress_theme'])
+const WP_USER_TYPE = 'wordpress_user_enumeration'
+const WP_ENDPOINT_TYPES = new Set(['wordpress_login_panel', 'wordpress_rest_api', 'wordpress_admin_ajax', 'wordpress_xmlrpc_enabled'])
+const WP_NONVULN_TYPES = new Set([...WP_INVENTORY_TYPES, WP_USER_TYPE, ...WP_ENDPOINT_TYPES])
 
 // Rows rendered per page-window before the operator asks for more (item 3:
 // keeps deep-range result sets from mounting tens of thousands of DOM nodes).
@@ -444,9 +485,10 @@ export default function TargetDetail() {
     targetsApi.get(id).then(t => {
       setTarget(t)
       setIsScanning(t.scan_status === 'running')
-      // Network targets never populate the default 'subdomains' tab — land on
-      // the tab that actually carries their results.
+      // Network/WordPress targets never populate the default 'subdomains' tab —
+      // land on the tab that actually carries their results.
 			if (t.kind === 'network') setTab('network-services')
+			else if ((t.tags || []).includes(WP_TAG)) setTab('wp-inventory')
     }).catch(() => navigate('/targets')).finally(() => setLoading(false))
     targetsApi.graph(id).then(g => setPaths(g.attack_paths || [])).catch(() => {})
     loadAssets()
@@ -532,6 +574,17 @@ export default function TargetDetail() {
         nuclei: 'nuclei',
         vuln_scan: 'vulns',
         monitor: 'monitor',
+        wp_enum: 'wp-inventory',
+        wp_users: 'wp-users',
+        wp_endpoints: 'wp-endpoints',
+        wp_config: 'vulns',
+        wp_backups: 'vulns',
+        wp_misconfig: 'vulns',
+        wp_credaudit: 'vulns',
+        wp_vulns: 'nuclei',
+        network: 'network-services',
+        network_nuclei_only: 'nuclei',
+        network_initial_access: 'vulns',
       }
       const targetTab = moduleToTab[p.current_module]
       if (targetTab && targetTab === tab) {
@@ -649,8 +702,24 @@ export default function TargetDetail() {
       else if (t === 'backups') r = await findingsApi.backupFindings(id)
       else if (t === 'redirects') r = await findingsApi.openRedirects(id)
       else if (t === 'nuclei') r = await findingsApi.nucleiFindings(id)
-      else if (t === 'vulns') r = fpView ? await findingsApi.vulnFindings(id, 'all', 'false_positive') : await findingsApi.vulnFindings(id, 'finding')
-      else if (t === 'candidates') r = await findingsApi.vulnFindings(id, 'candidate')
+      else if (t === 'vulns' || t === 'candidates') {
+        r = t === 'vulns'
+          ? (fpView ? await findingsApi.vulnFindings(id, 'all', 'false_positive') : await findingsApi.vulnFindings(id, 'finding'))
+          : await findingsApi.vulnFindings(id, 'candidate')
+        // On a WordPress project, wp_enum/wp_users/wp_endpoints' confirmed
+        // inventory facts (plugin present, username recovered, endpoint
+        // reachable) have their own dedicated tabs below — keep them out of
+        // the generic Confirmed/Needs Review lists so those stay what their
+        // names say: actual vulnerabilities, not install inventory.
+        if ((target?.tags || []).includes(WP_TAG)) {
+          r = (r as VulnFinding[]).filter(f => !WP_NONVULN_TYPES.has(f.type))
+        }
+      }
+      else if (t === 'wp-inventory' || t === 'wp-users' || t === 'wp-endpoints') {
+        const all = await findingsApi.vulnFindings(id, 'all') as VulnFinding[]
+        const want = t === 'wp-inventory' ? WP_INVENTORY_TYPES : t === 'wp-users' ? new Set([WP_USER_TYPE]) : WP_ENDPOINT_TYPES
+        r = all.filter(f => want.has(f.type))
+      }
       else if (t === 'cameras') r = await findingsApi.ingram(id)
       else if (t === 'monitor') r = await findingsApi.monitoringChanges(id)
       setData(r || [])
@@ -718,6 +787,10 @@ export default function TargetDetail() {
   // results block right after Network Services for network targets only; web
   // targets keep their original order untouched.
   const isNetwork = target.kind === 'network'
+  const isWordPress = (target.tags || []).includes(WP_TAG)
+  // Not a hook — a plain derived value computed fresh each render, so it's
+  // safe to live after the loading/!target early-return guards above.
+  const tabGroups = tabGroupsFor(isNetwork, isWordPress)
 
   return (
     <ErrorBoundary>
@@ -931,12 +1004,12 @@ export default function TargetDetail() {
       {isScanning && <LiveResults targetId={id!} active={isScanning} />}
 
       <div className="border-b border-border flex items-stretch overflow-x-auto">
-        {TAB_GROUPS.map((g, gi) => (
+        {tabGroups.map((g, gi) => (
           <div key={g.group} className="flex items-center">
             {gi > 0 && <span className="mx-1.5 my-2 w-px bg-border" />}
             <span className="pl-2 pr-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted/60 self-center select-none">{g.group}</span>
             {g.tabs.map(t => (
-              <button key={t.id} onClick={() => setTab(t.id)}
+              <button key={t.id} onClick={() => setTab(t.id)} title={t.desc}
                 className={cn(
                   'px-3 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-all',
                   tab === t.id ? 'border-accent text-accent' : 'border-transparent text-text-muted hover:text-text-secondary'
@@ -947,6 +1020,12 @@ export default function TargetDetail() {
           </div>
         ))}
       </div>
+      {(() => {
+        const activeTab = tabGroups.flatMap(g => g.tabs).find(t => t.id === tab)
+        return activeTab?.desc ? (
+          <p className="px-1 pt-1.5 text-[11px] text-text-muted">{activeTab.desc}</p>
+        ) : null
+      })()}
 
       {tab !== 'cameras' && (
       <div className="flex gap-2 items-center px-1 py-2 text-xs text-text-muted flex-wrap">
@@ -1038,6 +1117,8 @@ export default function TargetDetail() {
                       {tab === 'dirs' && ['URL', 'Status', 'Size', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'admin-panels' && ['Panel', 'Type', 'Status', 'Evidence', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
 											{tab === 'network-services' && ['Host', 'Port', 'Service', 'Product / Version', 'Banner', 'Web'].map(h => <th key={h} className="table-header">{h}</th>)}
+                      {tab === 'wp-inventory' && ['Kind', 'URL', 'Details', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
+                      {(tab === 'wp-users' || tab === 'wp-endpoints') && ['URL', 'Details', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'backups' && ['URL', 'Status', 'Size', 'Type', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'redirects' && ['URL', 'Redirects To', 'Verified', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
                       {tab === 'nuclei' && ['Severity', 'Template', 'URL', 'Description', 'Found'].map(h => <th key={h} className="table-header">{h}</th>)}
@@ -1201,6 +1282,35 @@ export default function TargetDetail() {
 											<td className="table-cell text-xs">{s.web_url ? <a href={s.web_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">{s.web_status || 'open'} · {truncate(s.web_title || s.web_url,35)}</a> : '—'}</td>
 										</tr>
 									))}
+                    {tab === 'wp-inventory' && (pageData as VulnFinding[]).map(f => (
+                      <tr key={f.id} className="table-row">
+                        <td className="table-cell">
+                          <span className="px-1.5 py-0.5 rounded bg-accent/15 text-accent text-[10px] font-semibold uppercase">
+                            {f.type === 'wordpress_version' ? 'Core' : f.type === 'wordpress_plugin' ? 'Plugin' : 'Theme'}
+                          </span>
+                        </td>
+                        <td className="table-cell max-w-sm">
+                          <div className="flex items-center gap-1.5">
+                            <a href={f.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono break-all">{truncate(f.url, 70)}</a>
+                            <CopyButton text={f.url} />
+                          </div>
+                        </td>
+                        <td className="table-cell text-xs text-text-muted max-w-lg">{f.evidence || '—'}</td>
+                        <td className="table-cell text-xs whitespace-nowrap">{timeAgo(f.created_at)}</td>
+                      </tr>
+                    ))}
+                    {(tab === 'wp-users' || tab === 'wp-endpoints') && (pageData as VulnFinding[]).map(f => (
+                      <tr key={f.id} className="table-row">
+                        <td className="table-cell max-w-sm">
+                          <div className="flex items-center gap-1.5">
+                            <a href={f.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono break-all">{truncate(f.url, 70)}</a>
+                            <CopyButton text={f.url} />
+                          </div>
+                        </td>
+                        <td className="table-cell text-xs text-text-muted max-w-lg">{f.evidence || '—'}</td>
+                        <td className="table-cell text-xs whitespace-nowrap">{timeAgo(f.created_at)}</td>
+                      </tr>
+                    ))}
                     {tab === 'backups' && (pageData as BackupFinding[]).map(b => (
                       <tr key={b.id} className="table-row">
                         <td className="table-cell max-w-sm">
