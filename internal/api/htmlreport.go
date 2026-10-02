@@ -66,7 +66,9 @@ func (h *Handler) handleGenerateReportHTML(w http.ResponseWriter, r *http.Reques
 	} {
 		fmt.Fprintf(&b, `<div class="stat"><span class="n">%d</span><span class="l">%s</span></div>`, counts[s.key], s.label)
 	}
-	b.WriteString(`</div></header>`)
+	b.WriteString(`</div>`)
+	b.WriteString(h.severityKPI(ctx, id))
+	b.WriteString(`</header>`)
 
 	// table of contents
 	b.WriteString(`<nav class="toc">`)
@@ -540,6 +542,40 @@ func sevBadge(sev string) string {
 	return fmt.Sprintf(`<span class="badge %s">%s</span>`, sevClass(sev), html.EscapeString(strings.ToUpper(sev)))
 }
 
+// severityKPI renders the executive severity summary — the Critical/High/Medium/
+// Low totals across confirmed vuln_findings and non-rejected nuclei_findings —
+// which is the first thing a report reader wants. Returns an empty string only
+// when the query layer fails.
+func (h *Handler) severityKPI(ctx context.Context, id string) string {
+	sev := map[string]int{"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+	add := func(q string) {
+		rows, err := h.db.QueryContext(ctx, q, id)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var s string
+			var n int
+			if rows.Scan(&s, &n) == nil {
+				sev[strings.ToLower(strings.TrimSpace(s))] += n
+			}
+		}
+	}
+	add(`SELECT LOWER(COALESCE(severity,'info')),COUNT(*) FROM vuln_findings
+		WHERE target_id=? AND COALESCE(status,'finding')='finding' GROUP BY LOWER(COALESCE(severity,'info'))`)
+	add(`SELECT LOWER(COALESCE(severity,'info')),COUNT(*) FROM nuclei_findings
+		WHERE target_id=? AND COALESCE(verification,'unverified')!='rejected' GROUP BY LOWER(COALESCE(severity,'info'))`)
+	var b strings.Builder
+	b.WriteString(`<div class="kpi">`)
+	for _, s := range []struct{ k, l string }{{"critical", "Critical"}, {"high", "High"}, {"medium", "Medium"}, {"low", "Low"}} {
+		fmt.Fprintf(&b, `<div class="kbox %s"><span class="kn">%d</span><span class="kl">%s</span></div>`,
+			sevClass(s.k), sev[s.k], s.l)
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
 func reportHead(domain string) string {
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -594,6 +630,34 @@ footer{padding:20px 22px;color:var(--mut);font-size:12px}
 .cam .caddr{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:700;font-size:14px}
 .cam .cprod{font-size:12px;color:var(--tx);text-transform:capitalize}
 .cam .cdesc{font-size:12px;color:var(--mut)}
+/* Executive severity summary */
+.kpi{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+.kbox{flex:1 1 120px;min-width:110px;border:1px solid var(--bd);border-radius:10px;padding:12px 14px;background:var(--card);border-left-width:4px}
+.kbox .kn{display:block;font-size:26px;font-weight:800;line-height:1}
+.kbox .kl{display:block;margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+.kbox.s-crit{border-left-color:#ef4444}.kbox.s-crit .kn{color:#ef4444}
+.kbox.s-high{border-left-color:#f97316}.kbox.s-high .kn{color:#f97316}
+.kbox.s-med{border-left-color:#eab308}.kbox.s-med .kn{color:#eab308}
+.kbox.s-low{border-left-color:#22c55e}.kbox.s-low .kn{color:#22c55e}
+/* Sticky search toolbar (added by script) */
+.toolbar{position:sticky;top:42px;z-index:4;display:flex;align-items:center;gap:10px;padding:10px 22px;background:rgba(15,17,21,.92);backdrop-filter:blur(6px);border-bottom:1px solid var(--bd)}
+.toolbar .search{flex:1;max-width:620px;background:var(--card2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);padding:8px 12px;font-size:13px}
+.toolbar .search:focus{outline:none;border-color:var(--acc)}
+.toolbar .shint{color:var(--mut);font-size:12px;white-space:nowrap}
+/* Collapsible sections */
+h2.collapser{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px}
+h2.collapser::before{content:'\25BE';font-size:12px;color:var(--mut);transition:transform .15s}
+section.collapsed h2.collapser::before{transform:rotate(-90deg)}
+section.collapsed > *:not(h2){display:none!important}
+.seccount{font-size:12px;font-weight:400;color:var(--mut)}
+/* Print / PDF */
+@media print{
+ body{background:#fff;color:#111}
+ .toc,.toolbar,.copy{display:none!important}
+ section,.vuln,.stat,.kbox,.tbl{break-inside:avoid}
+ section.collapsed > *:not(h2){display:revert!important}
+ a{color:#1a4fbf}
+}
 </style></head><body>`
 }
 
@@ -626,7 +690,9 @@ func (h *Handler) networkReportHTML(ctx context.Context, w http.ResponseWriter, 
 	for _, s := range stats {
 		fmt.Fprintf(&b, `<div class="stat"><span class="n">%d</span><span class="l">%s</span></div>`, s.n, html.EscapeString(s.label))
 	}
-	b.WriteString(`</div></header>`)
+	b.WriteString(`</div>`)
+	b.WriteString(h.severityKPI(ctx, id))
+	b.WriteString(`</header>`)
 
 	b.WriteString(`<nav class="toc">`)
 	for _, t := range []struct{ id, label string }{
@@ -860,5 +926,62 @@ document.querySelectorAll('.tbl table').forEach(function(table){
     th.addEventListener('click',function(){ sortTable(table,idx,th); });
   });
 });
+
+// Collapsible sections: click an h2 to toggle; sections heavier than 200 rows
+// start collapsed so a large report opens fast and stays navigable.
+document.querySelectorAll('section > h2').forEach(function(h){
+  h.classList.add('collapser');
+  var sec=h.parentElement;
+  var rows=sec.querySelectorAll('tbody tr').length;
+  var cards=sec.querySelectorAll('.vuln, .cam').length;
+  var total=rows+cards;
+  if(total>0){ var c=document.createElement('span'); c.className='seccount'; c.textContent=' ('+total+')'; h.appendChild(c); }
+  h.addEventListener('click',function(){ sec.classList.toggle('collapsed'); sec.removeAttribute('data-auto'); });
+  if(rows>200){ sec.classList.add('collapsed'); sec.setAttribute('data-auto','1'); }
+});
+
+// Global live filter across every finding, host, URL and table row. Hiding
+// non-matching rows (and the sections with none) keeps even a multi-thousand-row
+// report navigable. Debounced; works on thousands of rows without lag.
+(function(){
+  var toc=document.querySelector('.toc');
+  if(!toc||!toc.parentNode) return;
+  var bar=document.createElement('div'); bar.className='toolbar';
+  bar.innerHTML='<input class="search" type="search" placeholder="Filter the whole report — findings, hosts, URLs, parameters, evidence…"><span class="shint"></span>';
+  toc.parentNode.insertBefore(bar, toc.nextSibling);
+  var input=bar.querySelector('.search'), hint=bar.querySelector('.shint');
+  var items=[];
+  document.querySelectorAll('section').forEach(function(sec){
+    sec.querySelectorAll('tbody tr, .vuln, .cam').forEach(function(it){
+      items.push({el:it,sec:sec,text:(it.textContent||'').toLowerCase()});
+    });
+  });
+  var t=null;
+  function apply(q){
+    var shown=0, bySec={};
+    items.forEach(function(it){
+      var m = q==='' || it.text.indexOf(q)>=0;
+      it.el.style.display = m?'':'none';
+      if(m){ shown++; bySec[it.sec.id]=(bySec[it.sec.id]||0)+1; }
+    });
+    document.querySelectorAll('section').forEach(function(sec){
+      var had=sec.querySelector('tbody tr, .vuln, .cam');
+      if(!had) return;
+      if(q!==''){
+        sec.style.display = (bySec[sec.id]>0)?'':'none';
+        sec.classList.remove('collapsed'); // expand so matches are visible while searching
+      } else {
+        sec.style.display='';
+        if(sec.getAttribute('data-auto')==='1') sec.classList.add('collapsed');
+      }
+    });
+    hint.textContent = q===''? '' : (shown+' match'+(shown===1?'':'es'));
+  }
+  input.addEventListener('input',function(){
+    clearTimeout(t);
+    var q=(input.value||'').trim().toLowerCase();
+    t=setTimeout(function(){ apply(q); },120);
+  });
+})();
 </script></body></html>`
 }
