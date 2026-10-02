@@ -624,7 +624,14 @@ func scanOptionToken(module string) bool {
 	switch module {
 	case "speed_slow", "speed_normal", "speed_fast",
 		"no_subdomain_brute", "asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized", "classic_order",
-		"network_fast", "network_normal", "network_deep", "full_ports":
+		"network_fast", "network_normal", "network_deep", "full_ports",
+		// Per-scan WordPress credential-audit authorization token (sent by the WP
+		// Scanner brute-force tick). It is a passthrough flag consumed by the run
+		// loop (see the sentModules switch below), never dispatched as a phase —
+		// omitting it here left a phantom 'pending' task_phases row that nothing
+		// ever resolved, tripping the end-of-scan "phase ledger invariant failed"
+		// check on every WordPress scan with the brute-force tick selected.
+		"wp_cred_authorized":
 		return true
 	default:
 		return false

@@ -314,6 +314,45 @@ func TestCreateTaskOptionsDoNotInflateProgressTotal(t *testing.T) {
 	}
 }
 
+// TestCreateTaskWPCredAuthorizedIsNotAPhase is the regression for the WordPress
+// brute-force tick's SECOND failure mode: "internal phase ledger invariant
+// failed: 1 phase(s) never reached a terminal state" on every scan with
+// wp_cred_authorized selected. normalizeRequestedModules already admits the
+// token (TestRequestedModulesRejectEmptyUnknownAndRetiredSelections), but
+// scanOptionToken — the separate switch executableModules uses to decide which
+// selected tokens become task_phases rows — had not been taught about it, so a
+// 'pending' phase row was created for "wp_cred_authorized" that nothing ever
+// dispatches or resolves, and the end-of-scan terminal-state check failed the
+// whole task. Prove it is excluded from both tasks.total and task_phases, the
+// same way every other behavior-only token (speed_fast, single_endpoint, …) is.
+func TestCreateTaskWPCredAuthorizedIsNotAPhase(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id, domain) VALUES ('wp-cred-target','example.com')`); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask("wp-cred-target",
+		[]string{ModuleWPDetect, ModuleWPCredAudit, "wp_cred_authorized"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phaseCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_phases WHERE task_id=? AND module='wp_cred_authorized'`, task.ID).Scan(&phaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if phaseCount != 0 {
+		t.Fatalf("wp_cred_authorized got a task_phases row (count=%d) — it will never reach a terminal state and will fail every WordPress scan with the brute-force tick selected", phaseCount)
+	}
+	// Internal consistency: tasks.total must equal the actual number of phase
+	// rows created (the invariant check at end-of-scan compares against this).
+	var totalPhases int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_phases WHERE task_id=?`, task.ID).Scan(&totalPhases); err != nil {
+		t.Fatal(err)
+	}
+	if task.Total != totalPhases {
+		t.Fatalf("task.Total=%d but %d task_phases row(s) were created", task.Total, totalPhases)
+	}
+}
+
 func TestCreateTaskAdmitsExplicitNetworkPipelineOnly(t *testing.T) {
 	s := newTestScheduler(t)
 	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, kind) VALUES ('admission-target','10.0.0.1','network')`); err != nil {
