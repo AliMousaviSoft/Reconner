@@ -277,10 +277,20 @@ func (s *NucleiScanner) Run(ctx context.Context, targetID string, severity []str
 	// best-effort and time-boxed, so a first-ever scan actually has templates to
 	// run. Skipped silently when git is unavailable (offline appliance) — the
 	// operator can still populate the store via the update-templates button.
-	if s.cfg != nil && s.cfg.NucleiTemplates != "" && s.exec.IsToolAvailable("git") &&
-		!dirHasTemplates(s.cfg.NucleiTemplates) {
-		logFn("info", "nuclei", "Nuclei template store is empty (never provisioned) — syncing the official + fuzzing template set now (one-time; this first scan will take longer)...")
-		s.syncExtraTemplates(ctx, logFn)
+	if s.cfg != nil && s.cfg.NucleiTemplates != "" && !dirHasTemplates(s.cfg.NucleiTemplates) {
+		if s.exec.IsToolAvailable("git") {
+			logFn("info", "nuclei", "Nuclei template store is empty (never provisioned) — syncing the official + fuzzing template set now (one-time; this first scan will take longer)...")
+			s.syncExtraTemplates(ctx, logFn)
+		}
+		// Git-free fallback: if git is unavailable (or the clone produced nothing),
+		// use nuclei's OWN zip-based updater so a server without git still gets the
+		// official CVE/exposure corpus — otherwise wp_vulns (and every nuclei run)
+		// would silently execute only the small embedded pack and miss all the
+		// official WordPress plugin/core CVEs. This was the real cause of "WordPress
+		// finds no vulnerabilities" on a git-less appliance.
+		if !dirHasTemplates(s.cfg.NucleiTemplates) {
+			s.provisionTemplatesViaNucleiUpdate(ctx, logFn)
+		}
 	}
 	// DAST needs the official fuzzing-templates (XSS/SQLi/SSRF/LFI/SSTI param
 	// fuzzers) — which `nuclei -update-templates` does NOT pull. If DAST is on but
@@ -895,6 +905,35 @@ func (s *NucleiScanner) syncExtraTemplates(ctx context.Context, logFn LogFunc) {
 				}
 			}
 		}
+	}
+}
+
+// provisionTemplatesViaNucleiUpdate populates the official template corpus WITHOUT
+// git, using nuclei's own zip-based updater (`-update-templates`), installed into
+// our managed templates dir via `-update-template-dir`. This is the git-free
+// counterpart to syncExtraTemplates: on an appliance without git it is the only
+// way the official WordPress (and every other) CVE/exposure template set reaches
+// the scan — without it, every nuclei run executes only the embedded pack. It is
+// best-effort and time-boxed; any failure is logged and never blocks the scan.
+func (s *NucleiScanner) provisionTemplatesViaNucleiUpdate(ctx context.Context, logFn LogFunc) {
+	if s.cfg == nil || s.cfg.NucleiTemplates == "" || !s.exec.IsToolAvailable("nuclei") {
+		return
+	}
+	if err := os.MkdirAll(s.cfg.NucleiTemplates, 0o750); err != nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	logFn("info", "nuclei", "Provisioning the official nuclei template corpus with nuclei's own updater (git-free; one-time, this first scan will take longer)...")
+	if _, err := s.exec.Run(sctx, "nuclei",
+		"-update-templates", "-update-template-dir", s.cfg.NucleiTemplates, "-disable-update-check"); err != nil {
+		logFn("info", "nuclei", fmt.Sprintf("Git-free template provisioning skipped: %v", err))
+		return
+	}
+	if dirHasTemplates(s.cfg.NucleiTemplates) {
+		logFn("info", "nuclei", "Official nuclei template corpus provisioned (git-free) — CVE/exposure coverage is now active.")
+	} else {
+		logFn("info", "nuclei", "Git-free template provisioning ran but installed no templates; the embedded pack still provides baseline coverage.")
 	}
 }
 

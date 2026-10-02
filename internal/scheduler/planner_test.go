@@ -37,6 +37,18 @@ func TestRequestedModulesRejectEmptyUnknownAndRetiredSelections(t *testing.T) {
 	if !reflect.DeepEqual(got, []string{ModuleXSS, "speed_slow"}) {
 		t.Fatalf("normalized selection=%v", got)
 	}
+
+	// The WordPress Scanner can send every wp_* module plus the per-scan
+	// credential-audit authorization token; admission must accept them all (the
+	// token is a passthrough flag, not an executable module). Regression for the
+	// "unsupported module \"wp_cred_authorized\"" error the brute-force tick hit.
+	wpSel := []string{
+		ModuleWPDetect, ModuleWPEnum, ModuleWPUsers, ModuleWPConfig, ModuleWPBackups,
+		ModuleWPEndpoints, ModuleWPMisconfig, ModuleWPVulns, ModuleWPCredAudit, "wp_cred_authorized",
+	}
+	if _, err := normalizeRequestedModules(wpSel); err != nil {
+		t.Fatalf("WordPress selection with wp_cred_authorized must be accepted, got %v", err)
+	}
 }
 
 // The set of every DETECTOR module — used to prove single-vulnerability isolation

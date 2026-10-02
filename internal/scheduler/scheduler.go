@@ -695,6 +695,11 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
 		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports",
 		"network_fast", "network_normal", "network_deep",
+		// Per-scan WordPress credential-audit authorization token (sent by the WP
+		// Scanner brute-force tick). It is a passthrough flag consumed by the run
+		// loop, not an executable module — without it here, admission rejected any
+		// scan that ticked the brute-force box with "unsupported module".
+		"wp_cred_authorized",
 	} {
 		known[token] = true
 	}
