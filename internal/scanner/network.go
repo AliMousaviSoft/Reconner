@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,11 +27,26 @@ import (
 
 const networkNativeFallbackHosts = 256
 
+// fastNetworkPorts is the curated "important ports" list for the fast profile —
+// wide enough to catch the services that actually matter on a bug-bounty/pentest
+// target (remote access, databases, caches, message queues, container/orchestration
+// APIs, common web-admin ports) while staying far smaller than a full 65k sweep, so
+// the fast profile stays genuinely fast. The deep profile still sweeps every TCP
+// port regardless of this list.
 var fastNetworkPorts = []int{
-	21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 389, 443, 445,
-	465, 587, 636, 873, 993, 995, 1433, 1521, 2049, 2375, 2376, 3000,
-	3306, 3389, 5432, 5601, 5900, 5985, 5986, 6379, 6443, 8000, 8008,
-	8080, 8081, 8443, 8888, 9000, 9090, 9200, 9300, 11211, 27017,
+	20, 21, 22, 23, 25, 53, 69, 80, 88, 110, 111, 123, 135, 139, 143, 161, 389, 443, 445,
+	465, 500, 512, 513, 514, 515, 548, 554, 587, 593, 623, 631, 636, 873, 902, 989, 990,
+	993, 995, 1080, 1194, 1337, 1433, 1521, 1723, 1883, 2049, 2082, 2083, 2086, 2087,
+	2095, 2096, 2181, 2222, 2375, 2376, 2379, 2380, 3000, 3001, 3128, 3268, 3269, 3306,
+	3389, 3690, 4000, 4040, 4369, 4443, 4505, 4506, 4789, 4848, 5000, 5001, 5060, 5061,
+	5222, 5269, 5351, 5353, 5355, 5432, 5555, 5601, 5671, 5672, 5900, 5901, 5984, 5985,
+	5986, 6000, 6066, 6379, 6443, 6660, 6667, 6881, 7000, 7001, 7070, 7077, 7199, 7474,
+	7687, 7777, 8000, 8001, 8008, 8009, 8020, 8042, 8069, 8080, 8081, 8083, 8086, 8088,
+	8089, 8090, 8091, 8161, 8200, 8222, 8333, 8400, 8443, 8500, 8529, 8545, 8761, 8800,
+	8834, 8848, 8888, 8983, 9000, 9001, 9009, 9042, 9043, 9050, 9080, 9090, 9092, 9100,
+	9160, 9200, 9300, 9418, 9443, 9500, 9999, 10000, 10050, 10051, 10250, 10255, 11211,
+	15672, 16010, 16379, 17000, 18080, 19999, 20000, 24800, 25565, 27015, 27017, 27018,
+	27019, 28015, 28017, 32400, 32768, 44134, 49152, 50000, 50070, 54321,
 }
 
 type NetworkScanner struct {
@@ -487,12 +503,12 @@ func (s *NetworkScanner) fingerprintWithNmap(ctx context.Context, targetID strin
 		if err := xml.Unmarshal([]byte(result.Stdout), &parsed); err != nil {
 			return fmt.Errorf("parse nmap XML: %w", err)
 		}
-		s.persistNmap(targetID, parsed)
+		s.persistNmap(ctx, targetID, parsed)
 	}
 	return nil
 }
 
-func (s *NetworkScanner) persistNmap(targetID string, run nmapRun) {
+func (s *NetworkScanner) persistNmap(ctx context.Context, targetID string, run nmapRun) {
 	for _, host := range run.Hosts {
 		ip := ""
 		for _, addr := range host.Addresses {
@@ -524,6 +540,7 @@ func (s *NetworkScanner) persistNmap(targetID string, run nmapRun) {
 			if isWeb {
 				s.probeNetworkHTTP(targetID, ip, port.Port, tls)
 			}
+			s.probeKnownExposures(ctx, targetID, ip, port.Port, port.Service.Name)
 		}
 	}
 }
@@ -541,7 +558,72 @@ func (s *NetworkScanner) nativeFingerprint(ctx context.Context, targetID string,
 		if isWeb {
 			s.probeNetworkHTTP(targetID, item.IP, item.Port, tls)
 		}
+		s.probeKnownExposures(ctx, targetID, item.IP, item.Port, service)
 	}
+}
+
+// probeKnownExposures checks a freshly-fingerprinted service for a well-known,
+// zero-FP, no-credential-guessing exposure: anonymous FTP and unauthenticated
+// Redis. Both are PUBLIC server conventions, not a credential guess — RFC 1635
+// defines "anonymous" as a documented, non-secret FTP login, and a Redis
+// instance with no password configured accepts commands from anyone by design
+// — so neither needs the opt-in credential-audit authorization the
+// network_brute_* modules require. Confirmed by the exact same deterministic
+// protocol logic as the brute-force checkers (see network_brute.go); never a
+// guess, never ambiguous.
+func (s *NetworkScanner) probeKnownExposures(ctx context.Context, targetID, ip string, port int, service string) {
+	switch strings.ToLower(service) {
+	case "ftp":
+		if ftpLoginSucceeds(ctx, ip, port, "anonymous", "anonymous@reconner.local") {
+			addr := net.JoinHostPort(ip, strconv.Itoa(port))
+			s.storeNetworkFinding(ctx, targetID, "network_ftp_anonymous_access", "high", addr,
+				"ftp "+addr+"  (USER anonymous / PASS anonymous@reconner.local)",
+				"Anonymous FTP access is enabled — confirmed by the server's own 230 (user logged in) reply to the standard anonymous login (RFC 1635). Anyone can authenticate without a credential; review what the anonymous account can read/write and disable it if unneeded.")
+		}
+	case "redis":
+		if ok, info := redisUnauthenticatedAccess(ctx, ip, port); ok {
+			addr := net.JoinHostPort(ip, strconv.Itoa(port))
+			s.storeNetworkFinding(ctx, targetID, "network_redis_unauthenticated", "critical", addr,
+				"redis-cli -h "+ip+" -p "+strconv.Itoa(port)+" INFO",
+				"Redis accepted the INFO command with NO authentication at all ("+info+") — the instance has no password configured. Anyone who can reach this port has full read/write/eval access to the datastore. Set requirepass or bind it to a trusted network only.")
+		}
+	}
+}
+
+// redisUnauthenticatedAccess sends INFO without AUTH and confirms success by
+// TWO independent fields the response always carries (redis_version + run_id),
+// so a stray "redis_version" substring in an unrelated banner can never match
+// alone.
+func redisUnauthenticatedAccess(ctx context.Context, ip string, port int) (bool, string) {
+	conn, err := (&net.Dialer{Timeout: netDialTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)))
+	if err != nil {
+		return false, ""
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(netDialTimeout))
+	if _, err := conn.Write([]byte("*1\r\n$4\r\nINFO\r\n")); err != nil {
+		return false, ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(conn, 64*1024))
+	s := string(body)
+	if strings.Contains(s, "redis_version:") && strings.Contains(s, "run_id:") {
+		if m := regexp.MustCompile(`redis_version:(\S+)`).FindStringSubmatch(s); m != nil {
+			return true, "redis_version " + m[1]
+		}
+		return true, "redis_version present"
+	}
+	return false, ""
+}
+
+// storeNetworkFinding is store() for the network pipeline's own zero-FP
+// detections — same canonical DetectorObservation path every other detector in
+// Reconner uses.
+func (s *NetworkScanner) storeNetworkFinding(ctx context.Context, targetID, vulnType, severity, addr, poc, evidence string) {
+	_, _ = RecordDetectorObservation(ctx, s.db, DetectorObservation{
+		TargetID: targetID, Type: vulnType, Severity: severity, URL: addr, Method: "TCP",
+		Location: "service", Payload: poc, Evidence: evidence, Source: "network",
+		DetectionMethod: "network:" + vulnType, Confidence: 100, Priority: 500, Verdict: VerifyVerified,
+	})
 }
 
 func (s *NetworkScanner) probeNetworkHTTP(targetID, ip string, port int, tls bool) {

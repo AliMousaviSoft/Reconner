@@ -353,6 +353,61 @@ func TestCreateTaskWPCredAuthorizedIsNotAPhase(t *testing.T) {
 	}
 }
 
+// TestCreateTaskNetCredAuthorizedIsNotAPhase is the network-pipeline sibling of
+// TestCreateTaskWPCredAuthorizedIsNotAPhase: net_cred_authorized (the Network
+// Scanner's per-service brute-force authorization token) must never get a
+// task_phases row, or every network scan with a brute-force tick selected would
+// hit the same "phase ledger invariant failed" bug wp_cred_authorized did.
+func TestCreateTaskNetCredAuthorizedIsNotAPhase(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, kind) VALUES ('net-cred-target','10.0.0.5','network')`); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask("net-cred-target",
+		[]string{ModuleNetwork, ModuleNetworkBruteSSH, "net_cred_authorized"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phaseCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_phases WHERE task_id=? AND module='net_cred_authorized'`, task.ID).Scan(&phaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if phaseCount != 0 {
+		t.Fatalf("net_cred_authorized got a task_phases row (count=%d) — it will never reach a terminal state and will fail every network scan with a brute-force tick selected", phaseCount)
+	}
+	var totalPhases int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_phases WHERE task_id=?`, task.ID).Scan(&totalPhases); err != nil {
+		t.Fatal(err)
+	}
+	if task.Total != totalPhases {
+		t.Fatalf("task.Total=%d but %d task_phases row(s) were created", task.Total, totalPhases)
+	}
+}
+
+// TestResumeWithOnlyNetworkBruteModuleRemainingIsAdmitted is the concrete
+// scenario that would break if a new network_brute_* module were added to
+// runModule's dispatch but forgotten from isNetworkModule: a Resume() call
+// sends ONLY the not-yet-completed modules (CreateTask's "remaining" list), so
+// a task that already finished "network" and is resuming after a brute-force
+// module failure can submit a module list containing JUST network_brute_ssh —
+// with no base "network" module alongside it to carry hasNetwork=true. Every
+// per-service brute module must independently satisfy isNetworkModule so this
+// never gets rejected with "select the Network Scan pipeline for this asset".
+func TestResumeWithOnlyNetworkBruteModuleRemainingIsAdmitted(t *testing.T) {
+	s := newTestScheduler(t)
+	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, kind) VALUES ('net-resume-target','10.0.0.6','network')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, module := range []string{
+		ModuleNetworkBruteSSH, ModuleNetworkBruteFTP, ModuleNetworkBruteMySQL,
+		ModuleNetworkBrutePostgres, ModuleNetworkBruteRedis,
+	} {
+		if _, err := s.CreateTask("net-resume-target", []string{module}, 1); err != nil {
+			t.Errorf("module %q alone (the post-resume shape) was rejected: %v", module, err)
+		}
+	}
+}
+
 func TestCreateTaskAdmitsExplicitNetworkPipelineOnly(t *testing.T) {
 	s := newTestScheduler(t)
 	if _, err := s.db.Exec(`INSERT INTO targets (id, domain, kind) VALUES ('admission-target','10.0.0.1','network')`); err != nil {

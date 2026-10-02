@@ -147,3 +147,40 @@ func TestNucleiToCandidateVerifiableCarriesParam(t *testing.T) {
 		t.Fatalf("exposure classification: %+v", e)
 	}
 }
+
+// TestNetworkNucleiTagsAreServiceAware is the regression for RunNetwork always
+// passing a fixed ["network","ssl"] tag pair regardless of what was actually
+// detected — the official corpus's protocol-specific templates (redis, ssh,
+// mysql, rdp, …) were synced but never selected to run. The tag set must
+// reflect what THIS scan's own fingerprint pass found.
+func TestNetworkNucleiTagsAreServiceAware(t *testing.T) {
+	tags := networkNucleiTags(map[string]bool{"ssh": true, "redis": true, "": true})
+	want := map[string]bool{"network": true, "ssl": true, "ssh": true, "redis": true}
+	if len(tags) != len(want) {
+		t.Fatalf("tags=%v, want exactly %v", tags, want)
+	}
+	for _, tag := range tags {
+		if !want[tag] {
+			t.Errorf("unexpected tag %q in %v", tag, tags)
+		}
+	}
+
+	// An unrecognised/empty service name must never panic or add a bogus tag —
+	// only the generic baseline survives.
+	baseline := networkNucleiTags(map[string]bool{"some-unknown-banner": true})
+	if len(baseline) != 2 || baseline[0] != "network" || baseline[1] != "ssl" {
+		t.Fatalf("unrecognised service should fall back to the baseline, got %v", baseline)
+	}
+
+	// RDP's nmap service name (ms-wbt-server) must map to the "rdp" tag.
+	rdpTags := networkNucleiTags(map[string]bool{"ms-wbt-server": true})
+	found := false
+	for _, tag := range rdpTags {
+		if tag == "rdp" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ms-wbt-server must map to the rdp tag, got %v", rdpTags)
+	}
+}

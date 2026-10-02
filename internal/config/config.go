@@ -242,6 +242,12 @@ type Config struct {
 	// curated weak-password list, rate-limited and capped, confirmed only by a
 	// definitive auth-success signal — to avoid lockouts and noise.
 	EnableWPCredentialAudit bool `json:"enable_wp_credential_audit"`
+	// EnableNetworkCredentialAudit is the equivalent authorization switch for the
+	// Network Scanner's per-service weak-credential audit (SSH/FTP/MySQL/
+	// PostgreSQL/Redis). OFF by default; the per-scan "net_cred_authorized" token
+	// (the Network Scanner brute-force ticks, confirmed in the UI) is the other way
+	// to authorize a single scan without flipping this server-wide switch.
+	EnableNetworkCredentialAudit bool `json:"enable_network_credential_audit"`
 	// AIEnabled turns on the autonomous AI orchestrator: a Claude tool-use loop
 	// that drives Reconner's OWN engines (recon/DAST/nuclei/OAST/verify) toward a
 	// proven bug, optionally seeded with an operator hypothesis, and can focus on
@@ -588,6 +594,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("RECON_ENABLE_WP_CREDENTIAL_AUDIT"); v == "true" || v == "1" {
 		c.EnableWPCredentialAudit = true
+	}
+	if v := os.Getenv("RECON_ENABLE_NETWORK_CREDENTIAL_AUDIT"); v == "true" || v == "1" {
+		c.EnableNetworkCredentialAudit = true
 	}
 }
 

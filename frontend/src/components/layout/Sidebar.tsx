@@ -72,6 +72,7 @@ export const Sidebar = () => {
       { to: '/targets', label: 'Projects', Icon: Icons.targets, badge: targetsN > 0 ? { text: String(targetsN) } : null },
       { to: '/analyze', label: 'Guided Analyze', Icon: Icons.analyze },
       { to: '/wp-scanner', label: 'WP Scanner', Icon: Icons.wordpress },
+      { to: '/network-scanner', label: 'Network Scanner', Icon: Icons.network },
       { to: '/findings', label: 'Findings', Icon: Icons.findings },
       { to: '/tasks', label: 'Scan activity', Icon: Icons.tasks, badge: runningN > 0 ? { text: String(runningN), live: true } : null },
     ] },

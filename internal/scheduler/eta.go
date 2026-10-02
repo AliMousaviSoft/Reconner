@@ -25,6 +25,8 @@ var moduleETASeconds = map[string]int{
 	"wp_detect": 60, "wp_enum": 120, "wp_users": 40, "wp_config": 60, "wp_backups": 90,
 	"wp_endpoints": 40, "wp_misconfig": 40, "wp_credaudit": 120, "wp_vulns": 300,
 	"verify": 60, "monitor": 20,
+	"network_brute_ssh": 90, "network_brute_ftp": 60, "network_brute_mysql": 90,
+	"network_brute_postgres": 90, "network_brute_redis": 60,
 }
 
 func moduleEst(m string) int {

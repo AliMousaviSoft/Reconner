@@ -13,6 +13,7 @@ import System from './pages/System'
 import BountyPrograms from './pages/BountyPrograms'
 import GuidedAnalyze from './pages/GuidedAnalyze'
 import WPScanner from './pages/WPScanner'
+import NetworkScanner from './pages/NetworkScanner'
 import { Spinner } from './components/ui'
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -51,6 +52,7 @@ export default function App() {
           <Route path="bounty-programs" element={<BountyPrograms/>}/>
           <Route path="analyze" element={<GuidedAnalyze/>}/>
           <Route path="wp-scanner" element={<WPScanner/>}/>
+          <Route path="network-scanner" element={<NetworkScanner/>}/>
           <Route path="findings" element={<Findings/>}/>
           <Route path="tasks" element={<Tasks/>}/>
           <Route path="system" element={<System/>}/>

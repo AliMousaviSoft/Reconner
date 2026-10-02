@@ -145,21 +145,32 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
   if (networkMode) {
 		const networkDefs = [
 			{ id: 'network', label: 'Port, service & OS discovery', desc: 'TCP connect discovery, banner grabbing, nmap service fingerprint and opportunistic OS detection.' },
-			{ id: 'network_nuclei_only', label: 'Service-aware nuclei', desc: 'Run network/TCP templates only against verified open services.' },
+			{ id: 'network_nuclei_only', label: 'Service-aware nuclei', desc: 'Protocol-specific templates (ssh/ftp/mysql/redis/rdp/smb/…) selected from what was actually detected, plus network/ssl exposure checks.' },
 			{ id: 'network_initial_access', label: '401/403 verification', desc: 'Run the existing proof-gated authorization bypass checks against discovered web services.' },
-			{ id: 'network_brute', label: 'HTTP Basic credential audit', desc: 'Explicit, rate-limited top-1000 password check. Stops on lockout/rate limiting.' },
+			{ id: 'network_brute', label: 'HTTP Basic credential audit', danger: true, desc: 'Explicit, rate-limited top-1000 password check. Stops on lockout/rate limiting.' },
+			{ id: 'network_brute_ssh', label: 'SSH credential audit', danger: true, desc: 'Top-1000 passwords against verified SSH services. Confirmed only by a completed password handshake.' },
+			{ id: 'network_brute_ftp', label: 'FTP credential audit', danger: true, desc: 'Top-1000 passwords against verified FTP services. Confirmed only by the server’s own 230 reply.' },
+			{ id: 'network_brute_mysql', label: 'MySQL credential audit', danger: true, desc: 'Top-1000 passwords against verified MySQL services. Confirmed only by a successful connection.' },
+			{ id: 'network_brute_postgres', label: 'PostgreSQL credential audit', danger: true, desc: 'Top-1000 passwords against verified PostgreSQL services. Confirmed only by a successful/post-auth connection.' },
+			{ id: 'network_brute_redis', label: 'Redis credential audit', danger: true, desc: 'Top-1000 passwords against verified Redis services. Confirmed only by the server’s own +OK reply.' },
 		]
+		const bruteIds = networkDefs.filter(m => m.danger).map(m => m.id)
 		const applyNetworkProfile = (profile: 'fast' | 'normal' | 'deep') => {
 			setNetworkProfile(profile)
 			setNetworkModules(new Set(profile === 'fast' ? ['network'] : profile === 'normal'
 				? ['network', 'network_nuclei_only', 'network_initial_access']
-				: ['network', 'network_nuclei_only', 'network_initial_access', 'network_brute']))
+				: ['network', 'network_nuclei_only', 'network_initial_access', ...bruteIds]))
 		}
 		const startNetwork = async () => {
+			const bruteOn = bruteIds.some(id => networkModules.has(id))
+			if (bruteOn && !window.confirm(
+				'One or more credential-audit checks are selected. This actively sprays the top-1000 passwords ' +
+				'against the verified services of that type. Only proceed if you are explicitly authorized to test these targets.\n\nStart the audit?')) return
 			setLoading(true)
 			try {
 				const modules = networkDefs.filter(module => networkModules.has(module.id)).map(module => module.id)
 				if (!modules.includes('network')) modules.unshift('network')
+				if (bruteOn) modules.push('net_cred_authorized')
 				modules.push(`network_${networkProfile}`)
 				await startModules(modules)
 				addToast('success', `Network scan started for ${label}`)
@@ -179,7 +190,7 @@ export const ScanModal = ({ target, asset, open, onClose, onStarted }: Props) =>
 				</div>
 				<div className="rounded-xl border border-severity-high/25 bg-severity-high/[.05] p-3 text-[11px] leading-5 text-text-secondary">Runs only because Network Scan was explicitly selected. Recognised CDN/WAF edge IPs are excluded before probing. ICMP is recorded only as a hint and never suppresses TCP discovery.</div>
 				<div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-					{networkDefs.map(module => { const required=module.id==='network'; const on=required||networkModules.has(module.id); return <button key={module.id} type="button" disabled={required} onClick={() => setNetworkModules(previous => { const next=new Set(previous); next.has(module.id)?next.delete(module.id):next.add(module.id); return next })} className={cn('rounded-xl border p-3 text-left',on?'border-accent/40 bg-accent/[.1]':'border-border bg-white/[.02]')}><span className="block text-xs font-semibold text-text-primary">{module.label}{required?' · required':''}</span><span className="mt-1 block text-[10px] leading-4 text-text-muted">{module.desc}</span></button> })}
+					{networkDefs.map(module => { const required=module.id==='network'; const on=required||networkModules.has(module.id); return <button key={module.id} type="button" disabled={required} onClick={() => setNetworkModules(previous => { const next=new Set(previous); next.has(module.id)?next.delete(module.id):next.add(module.id); return next })} className={cn('rounded-xl border p-3 text-left',on?(module.danger?'border-severity-high/50 bg-severity-high/[.08]':'border-accent/40 bg-accent/[.1]'):'border-border bg-white/[.02]')}><span className="block text-xs font-semibold text-text-primary">{module.label}{required?' · required':''}{module.danger?' · opt-in':''}</span><span className="mt-1 block text-[10px] leading-4 text-text-muted">{module.desc}</span></button> })}
 				</div>
 			</div>
       </Modal>

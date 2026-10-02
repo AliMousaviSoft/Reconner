@@ -98,6 +98,16 @@ const (
 	ModuleNetworkIngram        = "network_ingram"
 	ModuleNetDevices           = "network_devices"
 	ModuleNetworkInitialAccess = "network_initial_access"
+	// Per-service network credential audit — the network pipeline's counterpart
+	// to wp_credaudit. Each is individually selectable and opt-in (gated by the
+	// net_cred_authorized passthrough token below); none ever guesses a port —
+	// each only targets services THIS scan's own network/fingerprint pass
+	// already verified open and identified by name.
+	ModuleNetworkBruteSSH      = "network_brute_ssh"
+	ModuleNetworkBruteFTP      = "network_brute_ftp"
+	ModuleNetworkBruteMySQL    = "network_brute_mysql"
+	ModuleNetworkBrutePostgres = "network_brute_postgres"
+	ModuleNetworkBruteRedis    = "network_brute_redis"
 )
 
 var AllModules = []string{
@@ -631,7 +641,11 @@ func scanOptionToken(module string) bool {
 		// omitting it here left a phantom 'pending' task_phases row that nothing
 		// ever resolved, tripping the end-of-scan "phase ledger invariant failed"
 		// check on every WordPress scan with the brute-force tick selected.
-		"wp_cred_authorized":
+		"wp_cred_authorized",
+		// Per-scan Network credential-audit authorization token — the same
+		// passthrough flag for the Network Scanner's brute-force ticks. Excluded
+		// here for the exact same reason as wp_cred_authorized above.
+		"net_cred_authorized":
 		return true
 	default:
 		return false
@@ -676,7 +690,9 @@ func unsupportedNetworkToken(module string) bool {
 
 func isNetworkModule(module string) bool {
 	switch module {
-	case ModuleNetwork, ModuleNetworkBrute, ModuleNetworkNucleiOnly, ModuleNetworkInitialAccess:
+	case ModuleNetwork, ModuleNetworkBrute, ModuleNetworkNucleiOnly, ModuleNetworkInitialAccess,
+		ModuleNetworkBruteSSH, ModuleNetworkBruteFTP, ModuleNetworkBruteMySQL,
+		ModuleNetworkBrutePostgres, ModuleNetworkBruteRedis:
 		return true
 	default:
 		return false
@@ -700,6 +716,8 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 		"asn_discovery", "no_asn_discovery", "single_endpoint", "prioritized", "classic_order",
 		ModuleNetwork, ModuleNetworkBrute, ModuleNetworkBackup, ModuleNetworkNucleiOnly,
 		ModuleNetworkIngram, ModuleNetDevices, ModuleNetworkInitialAccess,
+		ModuleNetworkBruteSSH, ModuleNetworkBruteFTP, ModuleNetworkBruteMySQL,
+		ModuleNetworkBrutePostgres, ModuleNetworkBruteRedis,
 		"nuclei_only", "bruteforce", "ingram", "initial_access", "full_ports",
 		"network_fast", "network_normal", "network_deep",
 		// Per-scan WordPress credential-audit authorization token (sent by the WP
@@ -707,6 +725,12 @@ func normalizeRequestedModules(modules []string) ([]string, error) {
 		// loop, not an executable module — without it here, admission rejected any
 		// scan that ticked the brute-force box with "unsupported module".
 		"wp_cred_authorized",
+		// Per-scan Network credential-audit authorization token (sent by the
+		// Network Scanner's per-service brute-force ticks). Same passthrough
+		// pattern as wp_cred_authorized above — it configures the run loop
+		// (see scanOptionToken, which ALSO excludes it from the phase ledger;
+		// forgetting that half is exactly the bug wp_cred_authorized hit).
+		"net_cred_authorized",
 	} {
 		known[token] = true
 	}
@@ -755,7 +779,7 @@ func (s *Scheduler) createTask(targetID string, modules []string, priority int, 
 			hasNetwork = true
 			continue
 		}
-		if !strings.HasPrefix(module, "network_") && module != "full_ports" {
+		if !strings.HasPrefix(module, "network_") && module != "full_ports" && module != "net_cred_authorized" {
 			hasWeb = true
 		}
 	}
@@ -1576,10 +1600,11 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	var modules []string
 	// Honor per-scan behavior options and build the executable phase list.
 	speed := scanner.SpeedNormal
-	subBrute := true          // slow permutation/brute phase of subdomain enum (default on)
-	asnDiscovery := false     // explicit opt-in only after program-scope/WHOIS verification
-	singleEndpoint := false   // confine the whole scan to the seed URL(s) and paths under them
-	wpCredAuthorized := false // operator-confirmed authorization for the active WordPress credential audit
+	subBrute := true           // slow permutation/brute phase of subdomain enum (default on)
+	asnDiscovery := false      // explicit opt-in only after program-scope/WHOIS verification
+	singleEndpoint := false    // confine the whole scan to the seed URL(s) and paths under them
+	wpCredAuthorized := false  // operator-confirmed authorization for the active WordPress credential audit
+	netCredAuthorized := false // operator-confirmed authorization for the active network credential audit
 	// prioritized: score every asset (main domain always first, then WAF/tech/
 	// panel/size signals) and run the full per-asset module group on the
 	// highest-value host before moving to the next, instead of sweeping one
@@ -1619,6 +1644,8 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 			singleEndpoint = true
 		case "wp_cred_authorized":
 			wpCredAuthorized = true
+		case "net_cred_authorized":
+			netCredAuthorized = true
 		case "network_fast":
 			networkProfile = scanner.NetworkFast
 		case "network_normal":
@@ -1634,6 +1661,7 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 	ctx = scanner.WithASNDiscovery(ctx, asnDiscovery)
 	ctx = scanner.WithNetworkProfile(ctx, networkProfile)
 	ctx = scanner.WithWPCredAuthorized(ctx, wpCredAuthorized)
+	ctx = scanner.WithNetCredAuthorized(ctx, netCredAuthorized)
 	// Single-endpoint mode: confine the pipeline to the seeded endpoint URL(s) and
 	// the paths under them. Also force the slow subdomain brute OFF (there is one
 	// host) and drop subdomain enumeration from the module list — the point is to
@@ -2413,6 +2441,16 @@ func (s *Scheduler) runModule(ctx context.Context, module, targetID, domain stri
 		return s.nucleiScanner.RunNetwork(ctx, targetID, domain, logFn)
 	case ModuleNetworkBrute:
 		return s.networkScanner.RunBasicAuth(ctx, targetID, domain, logFn)
+	case ModuleNetworkBruteSSH:
+		return s.networkScanner.RunBruteSSH(ctx, targetID, domain, logFn)
+	case ModuleNetworkBruteFTP:
+		return s.networkScanner.RunBruteFTP(ctx, targetID, domain, logFn)
+	case ModuleNetworkBruteMySQL:
+		return s.networkScanner.RunBruteMySQL(ctx, targetID, domain, logFn)
+	case ModuleNetworkBrutePostgres:
+		return s.networkScanner.RunBrutePostgres(ctx, targetID, domain, logFn)
+	case ModuleNetworkBruteRedis:
+		return s.networkScanner.RunBruteRedis(ctx, targetID, domain, logFn)
 	case ModuleNetworkInitialAccess:
 		ips, expandErr := scanner.ExpandNetworkScope(domain, scanner.MaxNetworkScopeHosts)
 		if expandErr != nil {

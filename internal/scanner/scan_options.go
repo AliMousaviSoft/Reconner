@@ -105,6 +105,27 @@ func wpCredAuthorizedFromContext(ctx context.Context) bool {
 	return false
 }
 
+type netCredAuthKey string
+
+const ctxNetCredAuth netCredAuthKey = "net_cred_authorized"
+
+// WithNetCredAuthorized marks THIS scan as explicitly authorized to run the
+// active network per-service credential audit (SSH/FTP/MySQL/PostgreSQL/Redis).
+// The Network Scanner UI sets it from the operator's confirmed brute-force
+// ticks. It is an alternative to the server-wide enable_network_credential_audit
+// switch; without either, no module submits a password.
+func WithNetCredAuthorized(ctx context.Context, authorized bool) context.Context {
+	return context.WithValue(ctx, ctxNetCredAuth, authorized)
+}
+
+// netCredAuthorizedFromContext is fail-closed: a missing flag means NOT authorized.
+func netCredAuthorizedFromContext(ctx context.Context) bool {
+	if v, ok := ctx.Value(ctxNetCredAuth).(bool); ok {
+		return v
+	}
+	return false
+}
+
 // ── Single-endpoint scan mode ────────────────────────────────────────────────
 //
 // When the operator scans a single URL and ticks "single endpoint", the whole

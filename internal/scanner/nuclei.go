@@ -331,26 +331,30 @@ func (s *NucleiScanner) RunNetwork(ctx context.Context, targetID, rawScope strin
 	if s.exec == nil || !s.exec.IsToolAvailable("nuclei") {
 		return BlockedPhase("nuclei binary is unavailable")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT ip,port FROM network_services WHERE target_id=? ORDER BY ip,port`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT ip,port,COALESCE(service,'') FROM network_services WHERE target_id=? ORDER BY ip,port`, targetID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	var targets []string
+	serviceSeen := map[string]bool{}
 	allowed, err := networkScopeSet(rawScope)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
-		var ip string
+		var ip, service string
 		var port int
-		if rows.Scan(&ip, &port) == nil && allowed[ip] {
+		if rows.Scan(&ip, &port, &service) == nil && allowed[ip] {
 			targets = append(targets, net.JoinHostPort(ip, strconv.Itoa(port)))
+			serviceSeen[service] = true
 		}
 	}
 	if len(targets) == 0 {
 		return BlockedPhase("no verified open network services for nuclei")
 	}
+	tags := networkNucleiTags(serviceSeen)
+	logFn("info", "network_nuclei_only", "Service-aware nuclei tags: "+strings.Join(tags, ","))
 	conc, bulk, rate := 100, 80, 300
 	if s.cfg != nil {
 		if s.cfg.Workers.Nuclei > conc {
@@ -369,9 +373,44 @@ func (s *NucleiScanner) RunNetwork(ctx context.Context, targetID, rawScope strin
 	}
 	var findings atomic.Int64
 	var warned atomic.Bool
-	s.runNucleiProcess(ctx, targetID, targets, []string{"medium", "high", "critical"}, []string{"network", "ssl"}, conc, bulk, rate, packDir, &findings, &warned, logFn)
+	s.runNucleiProcess(ctx, targetID, targets, []string{"medium", "high", "critical"}, tags, conc, bulk, rate, packDir, &findings, &warned, logFn)
 	logFn("info", "network_nuclei_only", fmt.Sprintf("Network nuclei complete. Found %d result(s).", findings.Load()))
 	return ctx.Err()
+}
+
+// networkServiceNucleiTags maps a detected service name (nmap's -sV service
+// field, or the native serviceHint() fallback — see network.go) to the nuclei
+// tag(s) that actually cover it in the official template corpus. A fixed
+// ["network","ssl"] tag pair used to be passed for EVERY scan regardless of
+// what was actually found, so the official corpus's protocol-specific content
+// (redis/mongodb/ssh/ftp/mysql/smb/rdp/elasticsearch/docker/…) was synced but
+// never selected to run. This is what actually exercises it.
+var networkServiceNucleiTags = map[string][]string{
+	"ssh": {"ssh"}, "ftp": {"ftp"}, "telnet": {"telnet"},
+	"mysql": {"mysql"}, "postgresql": {"postgres", "postgresql"},
+	"redis": {"redis"}, "mongodb": {"mongodb"}, "ms-wbt-server": {"rdp"},
+	"vnc": {"vnc"}, "microsoft-ds": {"smb"}, "netbios-ssn": {"smb"},
+	"ldap": {"ldap"}, "docker": {"docker"}, "memcached": {"memcached"},
+	"elasticsearch": {"elasticsearch"}, "oracle": {"oracle"},
+	"ms-sql-s": {"mssql"}, "nfs": {"nfs"}, "snmp": {"snmp"},
+}
+
+// networkNucleiTags builds the tag set for a RunNetwork pass from the distinct
+// service names this scan's own fingerprint pass detected, always including the
+// generic network/ssl baseline so exposure/misconfig templates with no specific
+// service tag still run.
+func networkNucleiTags(servicesSeen map[string]bool) []string {
+	tags := []string{"network", "ssl"}
+	seen := map[string]bool{"network": true, "ssl": true}
+	for service := range servicesSeen {
+		for _, t := range networkServiceNucleiTags[strings.ToLower(service)] {
+			if !seen[t] {
+				seen[t] = true
+				tags = append(tags, t)
+			}
+		}
+	}
+	return tags
 }
 
 // regroupIntoChunks splits items into at most maxChunks roughly-equal groups,
