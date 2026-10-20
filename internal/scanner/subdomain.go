@@ -367,6 +367,14 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	// CNAME records and browser/server-proven vhosts are preserved.
 	s.pruneRejectedSubdomains(ctx, targetID, rejected)
 
+	// Recursive enumeration: run passive discovery + resolution AGAINST each newly
+	// discovered resolving subdomain as its own sub-apex, descending until the
+	// configured depth or until a level finds nothing new. Gated on the same deep-
+	// work toggle as brute/permutation so the fast passive-only scan stays fast.
+	if subdomainBruteEnabled(ctx) {
+		s.recursiveEnum(ctx, targetID, domain, logFn)
+	}
+
 	logFn("info", "subdomain_enum", fmt.Sprintf("Subdomain enumeration complete. %d verified assets stored from %d discovered candidates.", s.countSubdomains(targetID), countFound()))
 
 	// Notify on genuinely new subdomains (re-scan only — see startSubCount above).
@@ -1222,6 +1230,143 @@ func (s *SubdomainScanner) existingSubdomainSet(ctx context.Context, targetID st
 			out[n] = true
 		}
 	}
+	return out
+}
+
+// subdomainRecursionDepth is the number of enumeration levels (apex = level 1).
+func (s *SubdomainScanner) subdomainRecursionDepth() int {
+	if s.cfg != nil && s.cfg.SubdomainRecursionDepth > 0 {
+		return s.cfg.SubdomainRecursionDepth
+	}
+	return 4
+}
+
+// recursiveEnum drives recursive subdomain discovery: after the apex is
+// enumerated, every newly discovered RESOLVING subdomain is enumerated as its
+// own sub-apex (passive sources + the wildcard-aware resolution gate), and the
+// deeper names that resolve become the next level's sub-apexes — down to the
+// configured depth, or until a level surfaces nothing new. Each level is bounded
+// (recursionMaxPerLevel) so a sprawling zone cannot turn this into an unbounded
+// fan-out. Only names that actually resolve are descended into, exactly as
+// requested.
+func (s *SubdomainScanner) recursiveEnum(ctx context.Context, targetID, apex string, logFn LogFunc) {
+	depth := s.subdomainRecursionDepth()
+	if depth <= 1 {
+		return
+	}
+	const recursionMaxPerLevel = 50
+
+	visited := map[string]bool{strings.ToLower(apex): true}
+	frontier := s.resolvingSubdomainsUnder(ctx, targetID, apex, visited)
+
+	for level := 2; level <= depth && len(frontier) > 0; level++ {
+		if ctx.Err() != nil {
+			return
+		}
+		if len(frontier) > recursionMaxPerLevel {
+			logFn("info", "subdomain_enum", fmt.Sprintf("Recursive enum L%d: %d candidate sub-apexes — limiting this level to %d", level, len(frontier), recursionMaxPerLevel))
+			frontier = frontier[:recursionMaxPerLevel]
+		}
+		logFn("info", "subdomain_enum", fmt.Sprintf("Recursive subdomain enum level %d/%d: enumerating %d sub-apex(es)", level, depth, len(frontier)))
+
+		var next []string
+		for _, sub := range frontier {
+			if ctx.Err() != nil {
+				return
+			}
+			if visited[sub] {
+				continue
+			}
+			visited[sub] = true
+
+			cands := s.gatherPassiveSubdomains(ctx, sub, logFn)
+			// Keep only genuinely new names under this sub-apex — drop the sub-apex
+			// itself and anything already visited at a shallower level.
+			for n := range cands {
+				if n == sub || visited[n] {
+					delete(cands, n)
+				}
+			}
+			if len(cands) == 0 {
+				continue
+			}
+			wIPs, wCNAMEs := detectWildcard(sub, s.resolver)
+			var mu sync.Mutex
+			rejected := s.resolveAll(ctx, targetID, cands, &mu, wIPs, wCNAMEs, logFn)
+			// Names that resolved (A/AAAA or CNAME) are the ones worth descending
+			// into: everything in cands that the admission gate did NOT reject.
+			for n := range cands {
+				if !rejected[n] && !visited[n] {
+					next = append(next, n)
+				}
+			}
+		}
+		sort.Strings(next)
+		frontier = next
+	}
+}
+
+// resolvingSubdomainsUnder returns the stored, resolving (has an IP) subdomains
+// strictly under apex, excluding anything already visited — the seed frontier
+// for recursive enumeration.
+func (s *SubdomainScanner) resolvingSubdomainsUnder(ctx context.Context, targetID, apex string, visited map[string]bool) []string {
+	rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains
+		WHERE target_id=? AND COALESCE(ip,'')!='' AND subdomain LIKE ?`, targetID, "%."+strings.ToLower(apex))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if rows.Scan(&n) != nil {
+			continue
+		}
+		n = strings.ToLower(strings.TrimSuffix(n, "."))
+		if n == apex || visited[n] || !isValidSubdomain(n, apex) {
+			continue
+		}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// gatherPassiveSubdomains runs the keyless passive HTTP sources against a single
+// domain and returns the valid in-scope names. Used by recursive enumeration to
+// discover deeper names under a sub-apex. (The apex scan in Run runs the same
+// sources interleaved with the slower CLI tools; recursion uses the fast passive
+// HTTP set only, so descending stays cheap.)
+func (s *SubdomainScanner) gatherPassiveSubdomains(ctx context.Context, domain string, logFn LogFunc) map[string]bool {
+	out := make(map[string]bool)
+	var mu sync.Mutex
+	sources := []func(string) ([]string, error){
+		queryCRTSH, queryCertSpotter, queryHackerTarget,
+		queryRapidDNS, queryOTX, queryAnubis, queryURLScan,
+	}
+	var wg sync.WaitGroup
+	for _, fn := range sources {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(fn func(string) ([]string, error)) {
+			defer wg.Done()
+			subs, err := fn(domain)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			for _, sub := range subs {
+				clean := strings.ToLower(strings.TrimSpace(sub))
+				if isValidSubdomain(clean, domain) {
+					out[clean] = true
+				}
+			}
+			mu.Unlock()
+		}(fn)
+	}
+	wg.Wait()
 	return out
 }
 

@@ -80,3 +80,50 @@ func TestRejectedAdmissionPrunesOnlyUnverifiedDNSRows(t *testing.T) {
 		t.Fatal("unverified junk DNS row survived admission cleanup")
 	}
 }
+
+// TestResolvingSubdomainsUnderScoping proves the recursive-enum frontier picks
+// only RESOLVING (has an IP) names strictly under the apex, excludes the apex
+// itself and anything already visited, and rejects out-of-scope rows.
+func TestResolvingSubdomainsUnderScoping(t *testing.T) {
+	db, tid := testDB(t)
+	defer db.Close()
+	ins := func(name, ip string) {
+		if _, err := db.Exec(`INSERT INTO subdomains (id,target_id,subdomain,ip,source)
+			VALUES (?,?,?,?, 'dns')`, uuid.New().String(), tid, name, ip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins("api.m.local", "1.2.3.4")      // resolving, in scope → included
+	ins("deep.api.m.local", "1.2.3.5") // resolving, deeper → included
+	ins("dead.m.local", "")            // no IP → excluded
+	ins("visited.m.local", "9.9.9.9")  // resolving but visited → excluded
+	ins("m.local", "1.1.1.1")          // the apex itself → excluded
+
+	s := &SubdomainScanner{db: db}
+	got := s.resolvingSubdomainsUnder(context.Background(), tid, "m.local",
+		map[string]bool{"visited.m.local": true})
+
+	want := map[string]bool{"api.m.local": true, "deep.api.m.local": true}
+	if len(got) != len(want) {
+		t.Fatalf("frontier=%v, want exactly %v", got, want)
+	}
+	for _, n := range got {
+		if !want[n] {
+			t.Errorf("unexpected name in recursion frontier: %q", n)
+		}
+	}
+}
+
+// TestSubdomainRecursionDepthDefault proves the depth helper falls back to 4 and
+// honors an explicit override.
+func TestSubdomainRecursionDepthDefault(t *testing.T) {
+	if d := (&SubdomainScanner{cfg: &config.Config{}}).subdomainRecursionDepth(); d != 4 {
+		t.Fatalf("default recursion depth = %d, want 4", d)
+	}
+	if d := (&SubdomainScanner{cfg: &config.Config{SubdomainRecursionDepth: 7}}).subdomainRecursionDepth(); d != 7 {
+		t.Fatalf("configured recursion depth = %d, want 7", d)
+	}
+	if d := (&SubdomainScanner{cfg: nil}).subdomainRecursionDepth(); d != 4 {
+		t.Fatalf("nil-cfg recursion depth = %d, want 4", d)
+	}
+}

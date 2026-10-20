@@ -212,6 +212,14 @@ type Config struct {
 	// (written to config.json) or the RECON_DNS_RESOLVERS env var (comma-separated,
 	// env wins). Set it to a single internal resolver to force the old behavior.
 	DNSResolvers []string `json:"dns_resolvers"`
+	// SubdomainRecursionDepth controls recursive subdomain enumeration: after the
+	// apex domain is enumerated, each newly-discovered RESOLVING subdomain is itself
+	// enumerated (passive sources + resolution) as a sub-apex, and so on, until this
+	// depth is reached or a level finds nothing new. Depth 0/1 ⇒ apex only (the old
+	// behavior). Default 4. A logical cap, not a hard ceiling on what can be found:
+	// raise it to go deeper on a sprawling target. Bounded per level
+	// (SubdomainRecursionMaxPerLevel) so it can't explode on a huge zone.
+	SubdomainRecursionDepth int `json:"subdomain_recursion_depth"`
 	// ScanWatchdogHours bounds one scan PHASE so a wedged module can never hold
 	// its concurrency slot forever (the actual purpose — see scheduler.go). It
 	// is deliberately reset after every completed phase, so the combined runtime
@@ -497,14 +505,15 @@ func defaultConfig() *Config {
 		// (see the field comments) instead of baking a fixed numeric ceiling into
 		// every config.json ever saved — an operator who wants a REAL cap sets one
 		// explicitly; a fresh install gets the generous built-in default.
-		ScanWatchdogHours: 24,                // per-phase watchdog floor; reset on progress and scaled for large targets
-		EnableDAST:        true,              // native context-aware DAST (XSS/SQLi) over all insertion points
-		AIModel:           "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
-		AIMaxIterations:   40,                // hard cap on the agent loop
-		AuthzMode:         "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
-		AuthzDestructive:  false,             // cross-user DELETE stays opt-in
-		Workers:           workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
-		Limits:            limits,            // auto-scaled to host CPU/RAM
+		ScanWatchdogHours:       24,                // per-phase watchdog floor; reset on progress and scaled for large targets
+		EnableDAST:              true,              // native context-aware DAST (XSS/SQLi) over all insertion points
+		AIModel:                 "claude-opus-4-8", // latest Opus; used only when AIEnabled and a key is set
+		AIMaxIterations:         40,                // hard cap on the agent loop
+		AuthzMode:               "balanced",        // two-identity BOLA: deep auth crawl + read/write differential
+		AuthzDestructive:        false,             // cross-user DELETE stays opt-in
+		SubdomainRecursionDepth: 4,                 // recurse passive+resolve into each resolving subdomain, up to 4 levels
+		Workers:                 workers,           // auto-scaled to host CPU (floors = previous fixed defaults)
+		Limits:                  limits,            // auto-scaled to host CPU/RAM
 	}
 }
 
