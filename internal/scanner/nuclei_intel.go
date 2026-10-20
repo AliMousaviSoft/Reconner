@@ -156,6 +156,19 @@ var blockedTemplateIDs = map[string]bool{
 	// reflection rejection, and optional OAST confirmation instead.
 	"unix-command-injection":    true,
 	"windows-command-injection": true,
+
+	// "VMware ESXi SLP - Heap Overflow DoS" (CVE-2019-5544): a network/tcp
+	// template whose confirmation sends an intrusive crash payload to port 427
+	// and infers the vuln from the service going unresponsive. Operator-flagged
+	// as a chronic false positive — any OpenSLP endpoint that is merely slow,
+	// rate-limiting, firewalled mid-sequence, or already patched (still answers
+	// the probe but doesn't crash) reads identically to "vulnerable", and the
+	// probe itself risks knocking over a live host. Both the lowercase and the
+	// canonical-case id are listed since nuclei's -eid match is normally
+	// case-insensitive but we don't want to depend on it; the display-name
+	// backstop below guarantees suppression regardless.
+	"cve-2019-5544": true,
+	"CVE-2019-5544": true,
 }
 
 // blockedNamePatterns are lowercase substrings of a template's DISPLAY NAME
@@ -198,6 +211,10 @@ var blockedNamePatterns = []string{
 	"cache poisoning",
 	"unix command injection",
 	"windows command injection",
+	// CVE-2019-5544 VMware ESXi SLP heap-overflow DoS — operator-flagged FP
+	// (see blockedTemplateIDs). Display-name backstop in case the synced id drifts.
+	"vmware esxi slp",
+	"esxi slp",
 }
 
 // injectionEchoMarkers identify templates whose "proof" is a token echoed back in
