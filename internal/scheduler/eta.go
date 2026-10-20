@@ -1,6 +1,33 @@
 package scheduler
 
-import "time"
+import (
+	"math"
+	"time"
+)
+
+// etaSizeScale maps a target's known host count to a multiplier on the baseline
+// estimate, so the INITIAL ETA (before any module finishes and the elapsed-vs-
+// baseline calibration can kick in) reflects target size instead of being the
+// same constant for every scan — the "ETA always starts at 7m" complaint. A
+// handful of hosts scans faster than the typical baseline; hundreds scan much
+// slower. Logarithmic so it spans small-to-huge targets without the big ones
+// producing absurd numbers. The factor cancels out once calibration is active
+// (it multiplies both the done and remaining baselines), so it only shapes the
+// pre-calibration estimate.
+func etaSizeScale(hostCount int) float64 {
+	if hostCount <= 0 {
+		return 1.0 // unknown size (first scan, pre-enumeration) → neutral baseline
+	}
+	// ~0.6 at 1 host, 1.0 at ~10, ~1.8 at ~100, ~2.6 at ~500, capped at 3.5.
+	scale := 0.6 + 0.4*math.Log10(float64(hostCount)+1)*math.Log10(float64(hostCount)+1)
+	if scale < 0.5 {
+		scale = 0.5
+	}
+	if scale > 3.5 {
+		scale = 3.5
+	}
+	return scale
+}
 
 // Scan ETA estimation. Modules have very different typical durations, so a flat
 // "elapsed / percent-done" is misleading (a scan can sit 90% through the module
@@ -42,21 +69,25 @@ func moduleEst(m string) int {
 // CURRENT module, given the full module list, the index of the module just started,
 // and how long the scan has been running. The baseline is calibrated by the ratio of
 // real elapsed time to the baseline for the modules already completed.
-func scanETA(modules []string, currentIdx int, elapsed time.Duration) (totalRemaining, currentRemaining int) {
+func scanETA(modules []string, currentIdx int, elapsed time.Duration, hostCount int) (totalRemaining, currentRemaining int) {
 	if currentIdx < 0 || currentIdx >= len(modules) {
 		return 0, 0
 	}
-	doneEst := 0
+	sizeScale := etaSizeScale(hostCount)
+	doneEst := 0.0
 	for i := 0; i < currentIdx; i++ {
-		doneEst += moduleEst(modules[i])
+		doneEst += float64(moduleEst(modules[i])) * sizeScale
 	}
-	remainingEst := 0
+	remainingEst := 0.0
 	for i := currentIdx; i < len(modules); i++ {
-		remainingEst += moduleEst(modules[i])
+		remainingEst += float64(moduleEst(modules[i])) * sizeScale
 	}
 	scale := 1.0
 	if doneEst > 0 && elapsed > 0 {
-		scale = elapsed.Seconds() / float64(doneEst)
+		// Calibrate to THIS target by the real elapsed-vs-baseline ratio of the
+		// modules already done. sizeScale is in both doneEst and remainingEst so it
+		// cancels here — calibration stays driven by observed speed, not the guess.
+		scale = elapsed.Seconds() / doneEst
 		if scale < 0.25 {
 			scale = 0.25
 		}
@@ -64,7 +95,7 @@ func scanETA(modules []string, currentIdx int, elapsed time.Duration) (totalRema
 			scale = 4
 		}
 	}
-	totalRemaining = int(scale * float64(remainingEst))
-	currentRemaining = int(scale * float64(moduleEst(modules[currentIdx])))
+	totalRemaining = int(scale * remainingEst)
+	currentRemaining = int(scale * float64(moduleEst(modules[currentIdx])) * sizeScale)
 	return totalRemaining, currentRemaining
 }

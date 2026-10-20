@@ -1824,8 +1824,12 @@ func (s *Scheduler) executeTask(parentCtx context.Context, taskID string) {
 
 		lastProgress = i
 		// ETA: seconds remaining for the whole scan and for this module, calibrated
-		// to this target by the elapsed-vs-baseline ratio of the modules done so far.
-		etaTotal, etaModule := scanETA(modules, i, time.Since(startedAt))
+		// to this target by the elapsed-vs-baseline ratio of the modules done so far,
+		// and shaped by the known host count so the INITIAL estimate reflects target
+		// size instead of a constant (the "always 7m at start" bug).
+		var hostCount int
+		_ = s.db.QueryRow(`SELECT COUNT(*) FROM subdomains WHERE target_id = ?`, targetID).Scan(&hostCount)
+		etaTotal, etaModule := scanETA(modules, i, time.Since(startedAt), hostCount)
 		_, _ = s.db.Exec(`
 			UPDATE tasks SET current_module = ?, progress = ?, eta_seconds = ?, module_eta_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
 		`, module, i, etaTotal, etaModule, taskID)

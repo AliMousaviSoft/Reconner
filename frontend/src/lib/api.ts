@@ -33,6 +33,39 @@ async function req<T>(path: string, options: RequestInit = {}): Promise<T> {
   return json as T
 }
 
+// fetchAllPaged walks a {data,total,page,limit} paginated endpoint and returns
+// EVERY row, not just the server's default first page. Several list endpoints
+// (subdomains, http-services) cap the default page at 100 and the plain req()
+// above discards `total`, so a target with hundreds of hosts silently showed
+// only the first 100. This loops at the server's max page size (500) until it
+// has pulled `total` rows.
+async function fetchAllPaged<T>(path: string, extra?: Record<string, string>): Promise<T[]> {
+  const pageSize = 500
+  let page = 1
+  const all: T[] = []
+  for (;;) {
+    const qs = new URLSearchParams({ ...(extra || {}), page: String(page), limit: String(pageSize) })
+    const res = await fetch(`${BASE}${path}?${qs.toString()}`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    const text = await res.text()
+    if (!res.ok) {
+      let msg = text
+      try { msg = JSON.parse(text).error || text } catch { /**/ }
+      throw new APIError(res.status, msg)
+    }
+    const json = text ? JSON.parse(text) : {}
+    const data: T[] = (json && Array.isArray(json.data)) ? json.data : []
+    all.push(...data)
+    const total = (json && typeof json.total === 'number') ? json.total : all.length
+    if (data.length === 0 || all.length >= total) break
+    page++
+    if (page > 200) break // hard safety stop: 200 * 500 = 100k rows
+  }
+  return all
+}
+
 export const auth = {
   login: (username: string, password: string) =>
     req<{message: string}>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
@@ -242,8 +275,8 @@ export interface BountyFavorite {
 }
 
 export const findings = {
-  subdomains: (id: string, p?: Record<string,string>) => req<Subdomain[]>(`/targets/${id}/subdomains${p ? '?'+new URLSearchParams(p) : ''}`),
-  httpServices: (id: string) => req<HTTPService[]>(`/targets/${id}/http-services`),
+  subdomains: (id: string, p?: Record<string,string>) => fetchAllPaged<Subdomain>(`/targets/${id}/subdomains`, p),
+  httpServices: (id: string) => fetchAllPaged<HTTPService>(`/targets/${id}/http-services`),
   jsFiles: (id: string) => req<JSFile[]>(`/targets/${id}/js-files`),
   jsFindings: (id: string) => req<JSFinding[]>(`/targets/${id}/js-findings`),
   parameters: (id: string, reflectedOnly = true) =>
