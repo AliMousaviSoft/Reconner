@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +31,12 @@ type SubdomainScanner struct {
 	cfg       *config.Config
 	logger    *logger.Logger
 	broadcast BroadcastFunc
+	// resolver dials the operator-configured (or default public) DNS servers
+	// directly instead of the container/host stub resolver. Set once at the top
+	// of Run and read-only thereafter, so the enumeration goroutines share it
+	// without locking. Inside Docker the stub resolver (127.0.0.11) single-flights
+	// every lookup, which is the dominant cause of enumeration taking hours.
+	resolver *net.Resolver
 }
 
 func NewSubdomainScanner(db *database.DB, exec *tools.Executor, cfg *config.Config, log *logger.Logger, broadcast BroadcastFunc) *SubdomainScanner {
@@ -37,6 +45,23 @@ func NewSubdomainScanner(db *database.DB, exec *tools.Executor, cfg *config.Conf
 
 func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, logFn LogFunc) error {
 	logFn("info", "subdomain_enum", fmt.Sprintf("Starting subdomain enumeration for %s", domain))
+
+	// Resolve through fast public (or operator-configured) DNS servers directly,
+	// not the container/host stub resolver. This is the single biggest speedup for
+	// enumeration: the Docker embedded resolver (127.0.0.11) single-flights every
+	// lookup, turning thousands of candidate resolutions into an hours-long serial
+	// queue. Built once here and shared read-only by the resolution goroutines.
+	if s.resolver == nil {
+		var resolvers []string
+		if s.cfg != nil {
+			resolvers = s.cfg.DNSResolverList()
+		}
+		s.resolver = buildDNSResolver(resolvers)
+		if len(resolvers) > 0 {
+			logFn("info", "subdomain_enum", fmt.Sprintf("Resolving via %d configured DNS server(s)", len(resolvers)))
+		}
+	}
+
 	// Seed the first scan from program/approved-asset metadata immediately. Later
 	// scans additionally reuse paths and parameter terms learned by web crawling.
 	buildAdaptiveWordlist(ctx, s.db, s.cfg, targetID, nil)
@@ -66,7 +91,7 @@ func (s *SubdomainScanner) Run(ctx context.Context, targetID, domain string, log
 	}
 
 	// Detect wildcard DNS up front so we can flag fake passive subdomains.
-	wildcardIPs, wildcardCNAMEs := detectWildcard(domain)
+	wildcardIPs, wildcardCNAMEs := detectWildcard(domain, s.resolver)
 	if len(wildcardIPs) > 0 || len(wildcardCNAMEs) > 0 {
 		logFn("warn", "subdomain_enum", fmt.Sprintf("Wildcard DNS detected (%d IPs) — passive results will be verified by resolution", len(wildcardIPs)))
 	}
@@ -598,7 +623,7 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	// Probe names DNS cannot distinguish: NXDOMAIN/no-address candidates and names
 	// whose only address is the wildcard answer. Ordinary independently-resolving
 	// hosts are already admitted and do not need expensive Host-header probing.
-	probeHosts := classifyVhostCandidates(ctx, candidates, wildcardIPs)
+	probeHosts := classifyVhostCandidates(ctx, candidates, wildcardIPs, s.resolver)
 
 	logFn("info", "vhost", fmt.Sprintf("Virtual-host scan: %d IP(s) × %d candidate host(s)...", len(ips), len(probeHosts)))
 
@@ -724,7 +749,7 @@ func (s *SubdomainScanner) vhostScan(ctx context.Context, targetID, domain strin
 	logFn("info", "vhost", fmt.Sprintf("Virtual-host scan done. %d vhost(s) discovered.", discovered))
 }
 
-func classifyVhostCandidates(ctx context.Context, candidates []string, wildcardIPs map[string]bool) []string {
+func classifyVhostCandidates(ctx context.Context, candidates []string, wildcardIPs map[string]bool, r *net.Resolver) []string {
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -740,7 +765,7 @@ func classifyVhostCandidates(ctx context.Context, candidates []string, wildcardI
 		go func() {
 			defer wg.Done()
 			for host := range jobs {
-				ips := resolveHostIPs(ctx, host)
+				ips := resolveHostIPs(ctx, host, r)
 				if len(ips) == 0 || overlapsWildcardIPs(ips, wildcardIPs) {
 					hits <- host
 				}
@@ -1007,7 +1032,7 @@ func (s *SubdomainScanner) activeEnum(ctx context.Context, targetID, domain stri
 				if ctx.Err() != nil {
 					return
 				}
-				ip := firstNonWildcardIP(resolveHostIPs(ctx, name), wildcardIPs)
+				ip := firstNonWildcardIP(resolveHostIPs(ctx, name, s.resolver), wildcardIPs)
 				if ip == "" {
 					continue
 				}
@@ -1068,11 +1093,24 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	mu.Unlock()
 	sort.Strings(names)
 
+	// Names already stored before this run. A re-scan must NOT re-broadcast every
+	// still-resolving name as "new_subdomain" — that spammed the dashboard bell as
+	// if an entire re-enumeration were fresh discoveries. Only names absent here
+	// are announced live.
+	preexisting := s.existingSubdomainSet(ctx, targetID)
+
 	jobs := make(chan string, len(names))
 	var wg sync.WaitGroup
 	var resolved, cnameOnly, wildcardHits, unresolved int
 	var cmu sync.Mutex
 	rejected := make(map[string]bool)
+	// Admission writes are COLLECTED and flushed in a single transaction after the
+	// resolution pass instead of one autocommit INSERT per name — on a target with
+	// hundreds/thousands of names the per-name commit was a real serial cost. The
+	// live "new_subdomain" broadcast still fires during resolution so the dashboard
+	// streams discoveries; only the DB write is batched.
+	type resolvedRow struct{ name, ip, source string }
+	var rows []resolvedRow
 	cnameCandidates, cnamePrefilter := s.dnsxCNAMECandidates(ctx, targetID, names)
 
 	for i := 0; i < workers; i++ {
@@ -1083,7 +1121,7 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 				if ctx.Err() != nil {
 					return
 				}
-				ips := resolveHostIPs(ctx, name)
+				ips := resolveHostIPs(ctx, name, s.resolver)
 				ip := firstNonWildcardIP(ips, wildcardIPs)
 				if ip == "" {
 					if len(ips) > 0 && overlapsWildcardIPs(ips, wildcardIPs) {
@@ -1097,12 +1135,12 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 					// available to takeover checks, but it is not sent to the web pipeline.
 					cname := ""
 					if !cnamePrefilter || cnameCandidates[name] {
-						cname = lookupExplicitCNAME(ctx, name)
+						cname = lookupExplicitCNAME(ctx, name, s.resolver)
 					}
 					if cname != "" && !wildcardCNAMEs[cname] {
-						_ = s.upsertSubdomainSource(targetID, name, "", "dns-cname")
 						cmu.Lock()
 						cnameOnly++
+						rows = append(rows, resolvedRow{name, "", "dns-cname"})
 						cmu.Unlock()
 						continue
 					}
@@ -1114,9 +1152,10 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 				}
 				cmu.Lock()
 				resolved++
+				rows = append(rows, resolvedRow{name, ip, "dns"})
+				isNew := !preexisting[name]
 				cmu.Unlock()
-				_ = s.upsertSubdomainSource(targetID, name, ip, "dns")
-				if s.broadcast != nil {
+				if isNew && s.broadcast != nil {
 					s.broadcast("new_subdomain", map[string]any{
 						"target_id": targetID,
 						"subdomain": name,
@@ -1133,8 +1172,57 @@ func (s *SubdomainScanner) resolveAll(ctx context.Context, targetID string, foun
 	close(jobs)
 	wg.Wait()
 
+	// Single-transaction flush of all admission writes.
+	if len(rows) > 0 {
+		if tx, err := s.db.BeginTx(ctx, nil); err == nil {
+			stmt, perr := tx.PrepareContext(ctx, `
+				INSERT INTO subdomains (id, target_id, subdomain, ip, source, last_seen)
+				VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				ON CONFLICT(target_id, subdomain) DO UPDATE SET
+					ip = excluded.ip,
+					source = CASE WHEN COALESCE(subdomains.source,'dns') IN ('seed','vhost')
+						THEN subdomains.source ELSE excluded.source END,
+					last_seen = CURRENT_TIMESTAMP`)
+			if perr == nil {
+				for _, r := range rows {
+					_, _ = stmt.ExecContext(ctx, uuid.New().String(), targetID, r.name, r.ip, r.source)
+				}
+				_ = stmt.Close()
+				_ = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+				// Fall back to per-row writes so a prepare failure never drops assets.
+				for _, r := range rows {
+					_ = s.upsertSubdomainSource(targetID, r.name, r.ip, r.source)
+				}
+			}
+		} else {
+			for _, r := range rows {
+				_ = s.upsertSubdomainSource(targetID, r.name, r.ip, r.source)
+			}
+		}
+	}
+
 	logFn("info", "subdomain_enum", fmt.Sprintf("Admission gate: %d A/AAAA verified, %d explicit CNAME, %d wildcard-only, %d unresolved (from %d candidates)", resolved, cnameOnly, wildcardHits, unresolved, len(names)))
 	return rejected
+}
+
+// existingSubdomainSet returns the set of subdomain names already stored for the
+// target, so a re-scan only broadcasts genuinely new discoveries.
+func (s *SubdomainScanner) existingSubdomainSet(ctx context.Context, targetID string) map[string]bool {
+	out := map[string]bool{}
+	rows, err := s.db.QueryContext(ctx, `SELECT subdomain FROM subdomains WHERE target_id=?`, targetID)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n string
+		if rows.Scan(&n) == nil {
+			out[n] = true
+		}
+	}
+	return out
 }
 
 func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID string, names []string) (map[string]bool, bool) {
@@ -1142,13 +1230,21 @@ func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID str
 		return nil, false
 	}
 	out := map[string]bool{}
+	args := []string{"-silent", "-cname", "-retry", "1"}
+	// Resolve the CNAME prefilter through the configured fast public resolvers,
+	// not the (often slow/single-flight) system resolver — this was a full extra
+	// serial DNS pass over the whole candidate list with no -r before.
+	if resolverFile, err := writeTempLines("recon-dnsx-cname-resolvers-", s.toolResolverList()); err == nil {
+		defer os.Remove(resolverFile)
+		args = append(args, "-r", resolverFile)
+	}
 	err := s.exec.RunWithInputCallback(ctx, strings.NewReader(strings.Join(names, "\n")), targetID,
 		func(line string) {
 			fields := strings.Fields(strings.ToLower(strings.TrimSpace(line)))
 			if len(fields) > 0 {
 				out[strings.TrimSuffix(fields[0], ".")] = true
 			}
-		}, "dnsx", "-silent", "-cname", "-retry", "1")
+		}, "dnsx", args...)
 	if err != nil && ctx.Err() == nil {
 		return nil, false
 	}
@@ -1157,7 +1253,7 @@ func (s *SubdomainScanner) dnsxCNAMECandidates(ctx context.Context, targetID str
 
 // detectWildcard probes a few random hostnames; if they resolve, the shared
 // IPs are wildcard answers we should treat with suspicion.
-func detectWildcard(domain string) (map[string]bool, map[string]bool) {
+func detectWildcard(domain string, r *net.Resolver) (map[string]bool, map[string]bool) {
 	wildcardIPs := make(map[string]bool)
 	wildcardCNAMEs := make(map[string]bool)
 	probes := []string{
@@ -1181,9 +1277,9 @@ func detectWildcard(domain string) (map[string]bool, map[string]bool) {
 		go func(name string) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-			ips, _ := net.DefaultResolver.LookupIPAddr(ctx, name)
+			ips, _ := resolverOrDefault(r).LookupIPAddr(ctx, name)
 			cancel()
-			results <- wildcardProbeResult{ips: ips, cname: lookupExplicitCNAME(context.Background(), name)}
+			results <- wildcardProbeResult{ips: ips, cname: lookupExplicitCNAME(context.Background(), name, r)}
 		}(p)
 	}
 	wg.Wait()
@@ -1264,10 +1360,38 @@ func (s *SubdomainScanner) pruneRejectedSubdomains(ctx context.Context, targetID
 	_ = tx.Commit()
 }
 
-func resolveHostIPs(parent context.Context, host string) []string {
+// buildDNSResolver returns a *net.Resolver that dials the given DNS servers
+// (host:port) directly, picking one at random per connection to spread load and
+// survive a single provider rate-limiting a noisy enumeration. An empty list
+// falls back to the system resolver. PreferGo keeps resolution in-process so the
+// custom Dial is actually used (cgo's resolver would ignore it).
+func buildDNSResolver(servers []string) *net.Resolver {
+	if len(servers) == 0 {
+		return net.DefaultResolver
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			srv := servers[rand.Intn(len(servers))]
+			d := net.Dialer{Timeout: 4 * time.Second}
+			return d.DialContext(ctx, network, srv)
+		},
+	}
+}
+
+// resolverOrDefault lets the free resolve helpers accept a nil resolver (callers
+// outside subdomain enumeration, e.g. recon_stack.go, keep the system resolver).
+func resolverOrDefault(r *net.Resolver) *net.Resolver {
+	if r == nil {
+		return net.DefaultResolver
+	}
+	return r
+}
+
+func resolveHostIPs(parent context.Context, host string, r *net.Resolver) []string {
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
-	rows, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	rows, err := resolverOrDefault(r).LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil
 	}
@@ -1310,10 +1434,10 @@ func overlapsWildcardIPs(ips []string, wildcard map[string]bool) bool {
 	return false
 }
 
-func lookupExplicitCNAME(parent context.Context, host string) string {
+func lookupExplicitCNAME(parent context.Context, host string, r *net.Resolver) string {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
-	cname, err := net.DefaultResolver.LookupCNAME(ctx, host)
+	cname, err := resolverOrDefault(r).LookupCNAME(ctx, host)
 	if err != nil {
 		return ""
 	}
@@ -1322,16 +1446,6 @@ func lookupExplicitCNAME(parent context.Context, host string) string {
 		return ""
 	}
 	return cname
-}
-
-func resolveHost(host string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil || len(ips) == 0 {
-		return ""
-	}
-	return ips[0].IP.String()
 }
 
 func isValidSubdomain(sub, domain string) bool {

@@ -20,14 +20,35 @@ import (
 // naabu (port scanning) and shodan (third-party intel) live in their own
 // modules (portscan.go, shodan.go) since they produce different result types.
 
-// publicResolvers is a small trustworthy resolver set used when the host has no
-// resolvers file of its own. puredns/massdns need resolvers to run at scale.
+// publicResolvers is the fallback resolver set used only when no config is
+// available (e.g. a test constructing the scanner without a Config).
+// puredns/massdns need a resolvers file to run at scale. Normal runs use the
+// operator-configured list via toolResolverList().
 var publicResolvers = []string{
 	"1.1.1.1", "1.0.0.1", // Cloudflare
 	"8.8.8.8", "8.8.4.4", // Google
 	"9.9.9.9", "149.112.112.112", // Quad9
 	"208.67.222.222", "208.67.220.220", // OpenDNS
 	"64.6.64.6", "64.6.65.6", // Verisign
+}
+
+// toolResolverList returns the operator-configured DNS resolvers (or the public
+// default set) as bare host / host:port entries suitable for a dnsx/puredns/
+// massdns -r resolvers file. The default :53 port is stripped since those tools
+// expect bare IPs; a non-standard port is preserved. This is the SAME list the
+// in-process Go resolver (s.resolver) uses, so the fast-public-resolver path is
+// consistent across the native resolution gate and the external brute tools.
+func (s *SubdomainScanner) toolResolverList() []string {
+	if s.cfg != nil {
+		if list := s.cfg.DNSResolverList(); len(list) > 0 {
+			out := make([]string, 0, len(list))
+			for _, r := range list {
+				out = append(out, strings.TrimSuffix(r, ":53"))
+			}
+			return out
+		}
+	}
+	return publicResolvers
 }
 
 // deepDNSEnum runs the heavy DNS discovery chain (alterx permutations +
@@ -63,9 +84,21 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 		logFn("info", "subdomain_enum", "Generating permutations with alterx...")
 		known := knownSnapshot
 		if len(known) > 0 {
+			// Bound alterx output. Its permutation count grows multiplicatively with
+			// the number of known names, so a target that already has a few hundred
+			// subdomains can make alterx emit hundreds of thousands to millions of
+			// candidates — the dominant cause of a scan ballooning (and, if an
+			// undetected catch-all admits them, of the dashboard filling with junk
+			// names). The cap keeps the adaptive brute large but finite.
+			const alterxMaxPermutations = 150000
 			var out []string
+			capped := false
 			err := s.exec.RunWithInputCallback(ctx, strings.NewReader(strings.Join(known, "\n")), targetID,
 				func(line string) {
+					if len(out) >= alterxMaxPermutations {
+						capped = true
+						return
+					}
 					line = strings.ToLower(strings.TrimSpace(line))
 					if isValidSubdomain(line, domain) {
 						out = append(out, line)
@@ -77,7 +110,11 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 			for _, n := range out {
 				candidates[n] = true
 			}
-			logFn("info", "subdomain_enum", fmt.Sprintf("alterx produced %d permutation candidates", len(out)))
+			if capped {
+				logFn("warn", "subdomain_enum", fmt.Sprintf("alterx permutation output capped at %d (target has %d known names) — brute set bounded", alterxMaxPermutations, len(known)))
+			} else {
+				logFn("info", "subdomain_enum", fmt.Sprintf("alterx produced %d permutation candidates", len(out)))
+			}
 		}
 	}
 
@@ -106,14 +143,26 @@ func (s *SubdomainScanner) deepDNSEnum(ctx context.Context, targetID, domain str
 		} else {
 			resolved = s.purednsResolve(ctx, targetID, names, logFn)
 		}
+		// Catch-all guard. These are RANDOM permutation/wordlist candidates, so on a
+		// normal zone only a tiny fraction should resolve. A high hit rate across a
+		// large candidate set means the zone answers everything (a wildcard/catch-all
+		// that detectWildcard's few random probes missed — rotating or partial
+		// wildcards do slip through). Admitting those would flood the target with
+		// hundreds of junk "subdomains" that are all the same catch-all host — the
+		// exact alterx-explosion symptom. Discard the batch instead.
+		if len(names) >= 200 && len(resolved)*100 >= len(names)*60 {
+			logFn("warn", "subdomain_enum", fmt.Sprintf("%s: %d/%d adaptive candidates resolved (%.0f%%) — catch-all/wildcard zone, discarding permutation batch to avoid junk flood", engine, len(resolved), len(names), float64(len(resolved))*100/float64(len(names))))
+			return
+		}
 		for _, n := range resolved {
+			ip := firstNonWildcardIP(resolveHostIPs(ctx, n, s.resolver), wildcardIPs)
+			if ip == "" {
+				continue // wildcard-only or unresolved on recheck — not an asset
+			}
 			mu.Lock()
 			found[n] = true
 			mu.Unlock()
-			ip := firstNonWildcardIP(resolveHostIPs(ctx, n), wildcardIPs)
-			if ip != "" {
-				_ = s.upsertSubdomain(targetID, n, ip)
-			}
+			_ = s.upsertSubdomain(targetID, n, ip)
 		}
 		logFn("info", "subdomain_enum", fmt.Sprintf("%s resolved %d/%d adaptive candidates", engine, len(resolved), len(names)))
 		return
@@ -144,7 +193,7 @@ func (s *SubdomainScanner) dnsxResolve(ctx context.Context, targetID string, nam
 	// in parallel instead of the one (often slow/rate-limited) system resolver.
 	// Same candidate set and the wildcard-aware admission gate still re-checks
 	// every hit, so this only changes throughput, not which names are accepted.
-	if resolverFile, err := writeTempLines("recon-dnsx-resolvers-", publicResolvers); err == nil {
+	if resolverFile, err := writeTempLines("recon-dnsx-resolvers-", s.toolResolverList()); err == nil {
 		defer os.Remove(resolverFile)
 		args = append(args, "-r", resolverFile)
 	}
@@ -175,7 +224,7 @@ func (s *SubdomainScanner) purednsBruteforce(ctx context.Context, targetID, doma
 		return nil, err
 	}
 	defer os.Remove(wordFile)
-	resolverFile, err := writeTempLines("recon-resolvers-", publicResolvers)
+	resolverFile, err := writeTempLines("recon-resolvers-", s.toolResolverList())
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +249,7 @@ func (s *SubdomainScanner) purednsResolve(ctx context.Context, targetID string, 
 	if len(names) == 0 {
 		return nil
 	}
-	resolverFile, err := writeTempLines("recon-resolvers-", publicResolvers)
+	resolverFile, err := writeTempLines("recon-resolvers-", s.toolResolverList())
 	if err != nil {
 		return nil
 	}
@@ -238,7 +287,7 @@ func (s *SubdomainScanner) resolveCandidates(ctx context.Context, targetID strin
 				if ctx.Err() != nil {
 					return
 				}
-				ip := firstNonWildcardIP(resolveHostIPs(ctx, name), wildcardIPs)
+				ip := firstNonWildcardIP(resolveHostIPs(ctx, name, s.resolver), wildcardIPs)
 				if ip == "" {
 					continue
 				}

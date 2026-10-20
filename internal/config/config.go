@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 type WorkerConfig struct {
@@ -200,6 +201,17 @@ type Config struct {
 	// never replaces the built-in list, only extends it. Passed as nuclei's
 	// -eid flag.
 	NucleiExcludeTemplateIDs []string `json:"nuclei_exclude_template_ids"`
+	// DNSResolvers is the list of DNS servers (host or host:port, UDP/53 assumed
+	// when no port) that subdomain enumeration resolves through, instead of the
+	// host/container stub resolver. Inside Docker the default resolver is the
+	// embedded 127.0.0.11 single-flight stub, which serializes lookups and makes
+	// resolving thousands of candidate names take hours. Pointing at fast public
+	// recursive resolvers (Cloudflare/Google/Quad9) removes that bottleneck and
+	// lets dnsx/puredns run at full fan-out. Empty ⇒ a built-in public-resolver
+	// default set (see DefaultDNSResolvers). Set via the System → Scanning page
+	// (written to config.json) or the RECON_DNS_RESOLVERS env var (comma-separated,
+	// env wins). Set it to a single internal resolver to force the old behavior.
+	DNSResolvers []string `json:"dns_resolvers"`
 	// ScanWatchdogHours bounds one scan PHASE so a wedged module can never hold
 	// its concurrency slot forever (the actual purpose — see scheduler.go). It
 	// is deliberately reset after every completed phase, so the combined runtime
@@ -610,6 +622,51 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("RECON_ENABLE_NETWORK_CREDENTIAL_AUDIT"); v == "true" || v == "1" {
 		c.EnableNetworkCredentialAudit = true
 	}
+	if v := os.Getenv("RECON_DNS_RESOLVERS"); strings.TrimSpace(v) != "" {
+		var resolvers []string
+		for _, r := range strings.Split(v, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				resolvers = append(resolvers, r)
+			}
+		}
+		if len(resolvers) > 0 {
+			c.DNSResolvers = resolvers
+		}
+	}
+}
+
+// DefaultDNSResolvers is the built-in set of fast public recursive resolvers
+// used for subdomain DNS resolution when the operator has not configured their
+// own. A mix of providers (Cloudflare, Google, Quad9, OpenDNS) spreads load and
+// survives any one provider rate-limiting a noisy enumeration.
+var DefaultDNSResolvers = []string{
+	"1.1.1.1", "1.0.0.1", // Cloudflare
+	"8.8.8.8", "8.8.4.4", // Google
+	"9.9.9.9", "149.112.112.112", // Quad9
+	"208.67.222.222", "208.67.220.220", // OpenDNS
+}
+
+// DNSResolverList returns the configured resolvers, or the public-resolver
+// default set when none are configured. Each entry is normalized to host:port
+// (UDP/53 assumed when no port is given).
+func (c *Config) DNSResolverList() []string {
+	src := c.DNSResolvers
+	if len(src) == 0 {
+		src = DefaultDNSResolvers
+	}
+	out := make([]string, 0, len(src))
+	for _, r := range src {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		// Bare IPv4/host → :53. Leave IPv6 and already-ported entries alone.
+		if !strings.Contains(r, ":") {
+			r += ":53"
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func (c *Config) ensureDirs() {
