@@ -329,6 +329,15 @@ export const tasks = {
 
 export interface ApiKeyState { name: string; label: string; hint: string; set: boolean; masked: string }
 
+export interface ScanConfig {
+  dns_resolvers: string[]
+  subdomain_recursion_depth: number
+  nuclei_exclude_template_ids: string[]
+  nuclei_extra_template_repos: string[]
+  default_dns_resolvers: string[]
+  default_nuclei_repos: string[]
+}
+
 export type TelegramRole = 'viewer' | 'operator' | 'admin'
 export interface TelegramChat {
   id: string; chat_id: string; label: string; role: TelegramRole; enabled: boolean
@@ -380,6 +389,9 @@ export const system = {
   getSettings: () => req<{ api_keys: ApiKeyState[] }>('/system/settings'),
   updateSettings: (patch: Record<string, string>) =>
     req<{ api_keys: ApiKeyState[] }>('/system/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
+  getScanConfig: () => req<ScanConfig>('/system/scan-config'),
+  updateScanConfig: (patch: Partial<ScanConfig>) =>
+    req<ScanConfig>('/system/scan-config', { method: 'PATCH', body: JSON.stringify(patch) }),
   corpora: () => req<CorpusCategory[]>('/system/corpora'),
   mergeCorpus: (category: string, text: string) =>
     req<CorpusMergeResult>(`/system/corpora/${encodeURIComponent(category)}`, { method: 'POST', body: JSON.stringify({ text }) }),

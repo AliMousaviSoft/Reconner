@@ -93,6 +93,98 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	h.handleGetSettings(w, r)
 }
 
+// scanConfigPayload is the operator-tunable scan configuration surfaced in the
+// System → Scanning panel. Keeping it a small explicit struct (rather than
+// reflecting over the whole Config) means only these deliberately-safe tunables
+// are reachable from the API — never secrets, paths, or auth settings.
+type scanConfigPayload struct {
+	DNSResolvers             []string `json:"dns_resolvers"`
+	SubdomainRecursionDepth  int      `json:"subdomain_recursion_depth"`
+	NucleiExcludeTemplateIDs []string `json:"nuclei_exclude_template_ids"`
+	NucleiExtraTemplateRepos []string `json:"nuclei_extra_template_repos"`
+	// DefaultDNSResolvers / DefaultNucleiRepos are read-only hints so the UI can
+	// show what the built-in defaults are when the operator has set nothing.
+	DefaultDNSResolvers []string `json:"default_dns_resolvers"`
+	DefaultNucleiRepos  []string `json:"default_nuclei_repos"`
+}
+
+// handleGetScanConfig returns the operator-tunable scan knobs: which DNS
+// resolvers subdomain enumeration uses, how deep recursive enumeration goes,
+// and which nuclei templates run (extra repos to clone + template IDs to
+// exclude). This is the "how is nuclei running / how do I change the templates
+// and resolvers" surface.
+func (h *Handler) handleGetScanConfig(w http.ResponseWriter, _ *http.Request) {
+	h.writeSuccess(w, scanConfigPayload{
+		DNSResolvers:             h.cfg.DNSResolvers,
+		SubdomainRecursionDepth:  h.cfg.SubdomainRecursionDepth,
+		NucleiExcludeTemplateIDs: h.cfg.NucleiExcludeTemplateIDs,
+		NucleiExtraTemplateRepos: h.cfg.NucleiExtraTemplateRepos,
+		DefaultDNSResolvers:      config.DefaultDNSResolvers,
+		DefaultNucleiRepos:       scanner.DefaultNucleiExtraRepos(),
+	})
+}
+
+// handleUpdateScanConfig persists edits to the scan tunables. Any provided field
+// replaces that list/value; an omitted field is left unchanged (pointer fields).
+// Admin-only: these lists control what requests every subsequent scan sends and
+// which third-party template repos are cloned onto the box.
+func (h *Handler) handleUpdateScanConfig(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DNSResolvers             *[]string `json:"dns_resolvers"`
+		SubdomainRecursionDepth  *int      `json:"subdomain_recursion_depth"`
+		NucleiExcludeTemplateIDs *[]string `json:"nuclei_exclude_template_ids"`
+		NucleiExtraTemplateRepos *[]string `json:"nuclei_extra_template_repos"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	clean := func(in []string) []string {
+		out := make([]string, 0, len(in))
+		seen := map[string]bool{}
+		for _, v := range in {
+			v = strings.TrimSpace(v)
+			if v != "" && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	if body.DNSResolvers != nil {
+		h.cfg.DNSResolvers = clean(*body.DNSResolvers)
+	}
+	if body.SubdomainRecursionDepth != nil {
+		d := *body.SubdomainRecursionDepth
+		if d < 1 {
+			d = 1
+		}
+		if d > 10 {
+			d = 10 // a hard ceiling: deeper than this is an explicit code change, not a UI slip
+		}
+		h.cfg.SubdomainRecursionDepth = d
+	}
+	if body.NucleiExcludeTemplateIDs != nil {
+		h.cfg.NucleiExcludeTemplateIDs = clean(*body.NucleiExcludeTemplateIDs)
+	}
+	if body.NucleiExtraTemplateRepos != nil {
+		// Only accept http(s) git URLs — never a local path or arbitrary scheme,
+		// since these get cloned and their YAML runs on this box.
+		var repos []string
+		for _, u := range clean(*body.NucleiExtraTemplateRepos) {
+			if strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://") {
+				repos = append(repos, u)
+			}
+		}
+		h.cfg.NucleiExtraTemplateRepos = repos
+	}
+	if err := h.cfg.Save(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "saved in memory but could not persist to config.json: "+err.Error())
+		return
+	}
+	h.handleGetScanConfig(w, r)
+}
+
 // handleListCorpora exposes counts and a short effective preview, never a
 // server-side path. Corpus mutation is admin-only because these lists control
 // the requests every subsequent scan may send.

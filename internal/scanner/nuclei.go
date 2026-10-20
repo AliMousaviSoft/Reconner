@@ -929,6 +929,15 @@ var defaultNucleiExtraRepos = []string{
 	"https://github.com/projectdiscovery/fuzzing-templates",
 }
 
+// DefaultNucleiExtraRepos exposes the built-in extra-template repo set so the
+// System → Scanning panel can show what runs by default when the operator has
+// configured none.
+func DefaultNucleiExtraRepos() []string {
+	out := make([]string, len(defaultNucleiExtraRepos))
+	copy(out, defaultNucleiExtraRepos)
+	return out
+}
+
 // syncExtraTemplates git-clones/pulls every repo in
 // cfg.NucleiExtraTemplateRepos (or defaultNucleiExtraRepos when unset) into
 // cfg.NucleiTemplates, on top of whatever -update-templates above already

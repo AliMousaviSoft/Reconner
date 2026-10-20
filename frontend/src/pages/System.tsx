@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { system, type ApiKeyState, type ToolCatalogEntry } from '../lib/api'
+import { system, type ApiKeyState, type ToolCatalogEntry, type ScanConfig } from '../lib/api'
 import { Button, Spinner } from '../components/ui'
 import { cn } from '../lib/utils'
 import { ws } from '../lib/websocket'
@@ -24,19 +24,32 @@ export default function System() {
   const [apiKeys, setApiKeys] = useState<ApiKeyState[]>([])
   const [drafts, setDrafts] = useState<Record<string,string>>({})
   const [savingKeys, setSavingKeys] = useState(false)
+  const [scanCfg, setScanCfg] = useState<ScanConfig | null>(null)
+  const [scanDraft, setScanDraft] = useState<{ resolvers: string; depth: number; excludeIDs: string; repos: string } | null>(null)
+  const [savingScanCfg, setSavingScanCfg] = useState(false)
   const { addToast } = useUIStore()
   const isAdmin = useAuthStore(s => s.user?.role === 'admin')
   const { info: updateInfo, checking: checkingUpdate, refresh: refreshUpdate, showDetails: showUpdateDetails } = useUpdateCenter()
   const templateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const load = async () => {
     try {
-      const [t, cat, s, ks] = await Promise.all([
+      const [t, cat, s, ks, sc] = await Promise.all([
         system.tools(),
         system.toolCatalog().catch(() => [] as ToolCatalogEntry[]),
         system.stats(),
         system.getSettings().catch(() => ({ api_keys: [] })),
+        system.getScanConfig().catch(() => null),
       ])
       setTools(t||{}); setCatalog(cat||[]); setStats(s||{}); setApiKeys(ks?.api_keys || [])
+      if (sc) {
+        setScanCfg(sc)
+        setScanDraft({
+          resolvers: (sc.dns_resolvers || []).join('\n'),
+          depth: sc.subdomain_recursion_depth || 4,
+          excludeIDs: (sc.nuclei_exclude_template_ids || []).join('\n'),
+          repos: (sc.nuclei_extra_template_repos || []).join('\n'),
+        })
+      }
     }
     catch { /**/ } finally { setLoading(false) }
   }
@@ -75,6 +88,30 @@ export default function System() {
       addToast('error', 'Failed to save API keys')
     } finally { setSavingKeys(false) }
   }
+  const splitLines = (s: string) => s.split('\n').map(l => l.trim()).filter(Boolean)
+  const saveScanCfg = async () => {
+    if (!scanDraft) return
+    setSavingScanCfg(true)
+    try {
+      const res = await system.updateScanConfig({
+        dns_resolvers: splitLines(scanDraft.resolvers),
+        subdomain_recursion_depth: scanDraft.depth,
+        nuclei_exclude_template_ids: splitLines(scanDraft.excludeIDs),
+        nuclei_extra_template_repos: splitLines(scanDraft.repos),
+      })
+      setScanCfg(res)
+      setScanDraft({
+        resolvers: (res.dns_resolvers || []).join('\n'),
+        depth: res.subdomain_recursion_depth || 4,
+        excludeIDs: (res.nuclei_exclude_template_ids || []).join('\n'),
+        repos: (res.nuclei_extra_template_repos || []).join('\n'),
+      })
+      addToast('success', 'Scan configuration saved — applies to the next scan')
+    } catch {
+      addToast('error', 'Failed to save scan configuration')
+    } finally { setSavingScanCfg(false) }
+  }
+
   useEffect(() => {
     load()
     const i = setInterval(() => system.stats().then(s => setStats(s || {})).catch(() => {}), 30000)
@@ -249,6 +286,50 @@ export default function System() {
               <p className="section-title">Template sync</p>
               <div className="space-y-1 max-h-44 overflow-y-auto font-mono text-xs">
                 {templateLog.map((l, i) => <p key={i} className={l.level === 'error' ? 'text-severity-critical' : l.level === 'warn' ? 'text-severity-medium' : 'text-text-secondary'}>{l.message}</p>)}
+              </div>
+            </div>
+          )}
+          {isAdmin && scanDraft && (
+            <div className="card p-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+                <div>
+                  <h2 className="text-sm font-semibold">Scanning configuration</h2>
+                  <p className="text-xs text-text-muted mt-1">Controls DNS resolution, recursive subdomain depth, and which nuclei templates run. Applies to the next scan.</p>
+                </div>
+                <Button size="sm" variant="primary" loading={savingScanCfg} onClick={saveScanCfg}>Save configuration</Button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-medium">DNS resolvers <span className="text-text-muted">(one per line)</span></label>
+                  <textarea rows={5} value={scanDraft.resolvers}
+                    onChange={e => setScanDraft(d => d && ({ ...d, resolvers: e.target.value }))}
+                    placeholder={(scanCfg?.default_dns_resolvers || []).join('\n')}
+                    className="input font-mono text-xs mt-1" />
+                  <p className="text-[10px] text-text-muted mt-1">Empty ⇒ built-in public resolvers (Cloudflare/Google/Quad9/OpenDNS). Pointing at fast resolvers is the biggest subdomain-enum speedup.</p>
+                </div>
+                <div>
+                  <label className="text-xs font-medium">Recursive subdomain depth</label>
+                  <input type="number" min={1} max={10} value={scanDraft.depth}
+                    onChange={e => setScanDraft(d => d && ({ ...d, depth: parseInt(e.target.value, 10) || 1 }))}
+                    className="input font-mono text-xs mt-1 w-28" />
+                  <p className="text-[10px] text-text-muted mt-1">After the apex, each resolving subdomain is itself enumerated, down to this many levels (default 4). 1 ⇒ apex only.</p>
+                </div>
+                <div>
+                  <label className="text-xs font-medium">Nuclei — exclude template IDs <span className="text-text-muted">(one per line)</span></label>
+                  <textarea rows={4} value={scanDraft.excludeIDs}
+                    onChange={e => setScanDraft(d => d && ({ ...d, excludeIDs: e.target.value }))}
+                    placeholder={'e.g.\nCVE-2019-5544\noptions-method'}
+                    className="input font-mono text-xs mt-1" />
+                  <p className="text-[10px] text-text-muted mt-1">Added on top of the built-in curated blocklist. Use a template's exact <span className="font-mono">id</span>.</p>
+                </div>
+                <div>
+                  <label className="text-xs font-medium">Nuclei — extra template repos <span className="text-text-muted">(git URLs, one per line)</span></label>
+                  <textarea rows={4} value={scanDraft.repos}
+                    onChange={e => setScanDraft(d => d && ({ ...d, repos: e.target.value }))}
+                    placeholder={(scanCfg?.default_nuclei_repos || []).join('\n')}
+                    className="input font-mono text-xs mt-1" />
+                  <p className="text-[10px] text-text-muted mt-1">Cloned on top of the official set. Empty ⇒ the two official ProjectDiscovery repos only. Community repos are a known false-positive source — add deliberately.</p>
+                </div>
               </div>
             </div>
           )}

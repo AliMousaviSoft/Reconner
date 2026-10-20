@@ -224,6 +224,8 @@ func (h *Handler) Router() http.Handler {
 	// System
 	api.HandleFunc("/system/settings", h.requireAuth(h.handleGetSettings)).Methods("GET")
 	api.HandleFunc("/system/settings", h.requireAuth(h.handleUpdateSettings)).Methods("PATCH")
+	api.HandleFunc("/system/scan-config", h.requireAuth(h.handleGetScanConfig)).Methods("GET")
+	api.HandleFunc("/system/scan-config", h.requireAdmin(h.handleUpdateScanConfig)).Methods("PATCH")
 	api.HandleFunc("/system/corpora", h.requireAdmin(h.handleListCorpora)).Methods("GET")
 	api.HandleFunc("/system/corpora/{category}", h.requireAdmin(h.handleMergeCorpus)).Methods("POST")
 	api.HandleFunc("/system/corpora/{category}/custom", h.requireAdmin(h.handleRestoreCorpus)).Methods("DELETE")
