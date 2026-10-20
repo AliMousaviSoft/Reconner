@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -677,12 +678,21 @@ func (b *TelegramBot) NotifyNewVuln(findingID, targetID, domain, vulnType, sever
 	b.enqueue("finding", "finding:"+findingID, text, b.findingKeyboard(targetID))
 }
 
-func (b *TelegramBot) NotifyMonitorChange(targetID, domain, changeType, rawURL, oldVal, newVal string) {
-	text := "🔭 Monitor change\nTarget: " + displayDomain(domain) + "\nType: " + changeType + "\n" + rawURL
+func (b *TelegramBot) NotifyMonitorChange(targetID, domain, changeType, title, rawURL, oldVal, newVal string) {
+	text := "🔭 Monitor change\nTarget: " + displayDomain(domain) + "\nType: " + changeType
+	// The notification title is the human-readable summary ("3 new subdomain(s)
+	// found on x.com", "security header removed", …) — surface it so the alert
+	// says WHAT changed, not just the change category + URL.
+	if title != "" {
+		text += "\n" + title
+	}
+	if rawURL != "" {
+		text += "\n" + rawURL
+	}
 	if oldVal != "" {
 		text += "\nOld: " + oldVal
 	}
-	if newVal != "" {
+	if newVal != "" && newVal != title {
 		text += "\nNew: " + newVal
 	}
 	b.enqueue("monitoring", "monitor:"+targetID+":"+changeType+":"+strconv.FormatInt(time.Now().UnixNano(), 10), text, b.scanKeyboard(targetID))
@@ -776,6 +786,15 @@ func shortDuration(d time.Duration) string {
 
 func displayDomain(domain string) string {
 	domain = strings.TrimSpace(domain)
+	// Normalize an endpoint/URL-seed target (https://x.com/app?h=1) down to its
+	// host so the alert header reads "Target: x.com", not a raw URL with scheme,
+	// path and query. A plain host passes through unchanged.
+	if strings.Contains(domain, "://") {
+		if u, err := url.Parse(domain); err == nil && u.Host != "" {
+			domain = u.Host
+		}
+	}
+	domain = strings.TrimSuffix(domain, "/")
 	if len([]rune(domain)) > 180 {
 		return string([]rune(domain)[:177]) + "…"
 	}

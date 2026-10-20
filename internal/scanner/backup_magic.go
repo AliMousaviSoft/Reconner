@@ -97,11 +97,21 @@ var coreBackupExts = []string{".zip", ".rar", ".sql", ".tar.gz", ".bak", ".7z", 
 var backupSuffixes = []string{".bak", ".old", ".swp", ".save", ".orig", "~", ".1", ".zip"}
 
 // backupConfigFiles are config/source files that frequently get backed up in place.
+// Each is cross-producted with backupSuffixes (.bak/.old/~/.swp/…) so e.g.
+// "config/database.php.bak" and "local.settings.json~" are probed — the exact
+// editor/deploy leftovers that leak credentials.
 var backupConfigFiles = []string{
 	"index.php", "config.php", "wp-config.php", "configuration.php",
 	"settings.py", "web.config", "application.properties", ".env",
 	"database.yml", "appsettings.json", "docker-compose.yml", ".git/config",
 	"config.json", "app.js", "main.py", "server.js",
+	// Framework/cloud config + secret files that are very commonly left behind as
+	// an in-place backup/editor-swap and leak credentials when they are:
+	"application.yml", "application.yaml", "config/database.php", "config/app.php",
+	"local.settings.json", "appsettings.Production.json", "secrets.json",
+	"credentials.json", "firebase.json", "ormconfig.json", "knexfile.js",
+	"settings.php", "parameters.yml", ".env.production", ".env.local",
+	"wp-config-sample.php", "config.inc.php", "connect.php", "db.php",
 }
 
 // backupWords is a curated ~130-word set of common backup/dump base names

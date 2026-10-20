@@ -178,7 +178,7 @@ type Notifier interface {
 	NotifyPhaseFinished(taskID, targetID, domain, phase, status string, duration time.Duration, progress, total int)
 	NotifyScanFinished(taskID, targetID, domain, status string, duration time.Duration, stats map[string]int)
 	NotifyNewVuln(findingID, targetID, domain, vulnType, severity, url, parameter string)
-	NotifyMonitorChange(targetID, domain, changeType, url, oldVal, newVal string)
+	NotifyMonitorChange(targetID, domain, changeType, title, url, oldVal, newVal string)
 }
 
 type Scheduler struct {
@@ -355,11 +355,11 @@ func (s *Scheduler) broadcastAndScore(event string, data any) {
 		if targetID == "" {
 			return
 		}
-		var domain, rawURL, oldVal, newVal string
+		var domain, title, rawURL, oldVal, newVal string
 		_ = s.db.QueryRow(`SELECT domain FROM targets WHERE id=?`, targetID).Scan(&domain)
-		_ = s.db.QueryRow(`SELECT COALESCE(url,''),COALESCE(body,'') FROM notifications
-			WHERE target_id=? AND type=? ORDER BY created_at DESC LIMIT 1`, targetID, changeType).Scan(&rawURL, &newVal)
-		s.notifier.NotifyMonitorChange(targetID, domain, changeType, rawURL, oldVal, newVal)
+		_ = s.db.QueryRow(`SELECT COALESCE(title,''),COALESCE(url,''),COALESCE(body,'') FROM notifications
+			WHERE target_id=? AND type=? ORDER BY created_at DESC LIMIT 1`, targetID, changeType).Scan(&title, &rawURL, &newVal)
+		s.notifier.NotifyMonitorChange(targetID, domain, changeType, title, rawURL, oldVal, newVal)
 		return
 	}
 	if event != "new_vuln_finding" {
@@ -2321,7 +2321,7 @@ func (s *Scheduler) escalateIfChanged(targetID, domain string, baselineSubs int,
 		"new_subdomains", newSubs, "changes", changes)
 	if s.notifier != nil {
 		summary := fmt.Sprintf("%d new subdomain(s), %d change(s) — scheduling change-specific verification", newSubs, changes)
-		s.notifier.NotifyMonitorChange(targetID, domain, "new-asset", summary, "", "")
+		s.notifier.NotifyMonitorChange(targetID, domain, "new-asset", summary, "", "", "")
 	}
 
 	// Build a selective follow-up from the actual diff. A changed JS seed needs
@@ -2403,7 +2403,7 @@ func (s *Scheduler) notifyBountyScopeEvent(ctx context.Context, targetID, progra
 	var domain string
 	_ = s.db.QueryRow(`SELECT domain FROM targets WHERE id=?`, targetID).Scan(&domain)
 	if s.notifier != nil {
-		s.notifier.NotifyMonitorChange(targetID, domain, "bounty-"+eventType, identifier, "", "")
+		s.notifier.NotifyMonitorChange(targetID, domain, "bounty-"+eventType, identifier, "", "", "")
 	}
 	if eventType != "added" {
 		return // only a NEW in-scope asset warrants an automated follow-up scan
