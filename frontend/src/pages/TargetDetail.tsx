@@ -1515,7 +1515,7 @@ export default function TargetDetail() {
                       )
                     })}
                     {tab === 'monitor' && (pageData as MonitoringChange[]).map(c => (
-                      <tr key={c.id} className="table-row">
+                      <tr key={c.id} className="table-row align-top">
                         <td className="table-cell max-w-xs">
                           <div className="flex items-center gap-1.5">
                             <a href={c.url} target="_blank" rel="noreferrer" className="text-accent hover:underline text-xs font-mono truncate">{truncate(c.url, 50)}</a>
@@ -1523,11 +1523,24 @@ export default function TargetDetail() {
                           </div>
                         </td>
                         <td className="table-cell">
-                          <Badge variant={c.change_type === 'js_change' ? 'medium' : 'info'}>{c.change_type}</Badge>
+                          <Badge variant={c.change_type === 'js_change' ? 'medium' : c.change_type.startsWith('security') || c.change_type.includes('header') ? 'high' : c.change_type === 'tech_change' ? 'low' : 'info'}>{c.change_type}</Badge>
                         </td>
-                        <td className="table-cell text-xs text-text-muted max-w-xs font-mono">{truncate(c.old_value, 50)}</td>
-                        <td className="table-cell text-xs text-severity-medium max-w-xs font-mono">{truncate(c.new_value, 50)}</td>
-                        <td className="table-cell text-xs">{timeAgo(c.detected_at)}</td>
+                        {/* Old/new values were truncated to 50 chars with no way to read the
+                            rest. Now each value wraps, shows the full text on hover, and has a
+                            copy button, so a full diff is actually inspectable. */}
+                        <td className="table-cell text-xs text-text-muted font-mono break-all whitespace-pre-wrap max-w-sm">
+                          <div className="flex items-start gap-1">
+                            <span title={c.old_value} className="flex-1">{c.old_value || '—'}</span>
+                            {c.old_value && <CopyButton text={c.old_value} />}
+                          </div>
+                        </td>
+                        <td className="table-cell text-xs text-severity-medium font-mono break-all whitespace-pre-wrap max-w-sm">
+                          <div className="flex items-start gap-1">
+                            <span title={c.new_value} className="flex-1">{c.new_value || '—'}</span>
+                            {c.new_value && <CopyButton text={c.new_value} />}
+                          </div>
+                        </td>
+                        <td className="table-cell text-xs whitespace-nowrap">{timeAgo(c.detected_at)}</td>
                       </tr>
                     ))}
                   </tbody>

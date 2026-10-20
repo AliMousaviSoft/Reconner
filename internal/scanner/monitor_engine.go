@@ -129,6 +129,8 @@ func classifyChangeSeverity(changeType string) string {
 		return "medium"
 	case strings.Contains(changeType, "js_change"):
 		return "medium"
+	case strings.Contains(changeType, "tech_change"):
+		return "low"
 	case strings.Contains(changeType, "http_change"):
 		return "low"
 	default:

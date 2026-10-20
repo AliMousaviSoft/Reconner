@@ -68,7 +68,7 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 	// Check HTTP services for changes
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, url, status_code, title, content_length, hash,
-		       COALESCE(norm_hash,''), COALESCE(security_snapshot,'')
+		       COALESCE(norm_hash,''), COALESCE(security_snapshot,''), COALESCE(server,'')
 		FROM http_services WHERE target_id = ? AND COALESCE(source,'probe')='probe'
 	`, targetID)
 	if err != nil {
@@ -84,11 +84,12 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 		Hash          string
 		NormHash      string
 		SecSnapshot   string
+		Server        string
 	}
 	var services []svcRecord
 	for rows.Next() {
 		var r svcRecord
-		if err := rows.Scan(&r.ID, &r.URL, &r.StatusCode, &r.Title, &r.ContentLength, &r.Hash, &r.NormHash, &r.SecSnapshot); err != nil {
+		if err := rows.Scan(&r.ID, &r.URL, &r.StatusCode, &r.Title, &r.ContentLength, &r.Hash, &r.NormHash, &r.SecSnapshot, &r.Server); err != nil {
 			rows.Close()
 			return err
 		}
@@ -188,11 +189,32 @@ func (s *MonitorScanner) Run(ctx context.Context, targetID string, logFn LogFunc
 			changed++
 		}
 
-		// Always update the stored baseline (norm hash + security snapshot).
+		// ── Technology-stack change ──
+		// The Server banner is the cheapest, most reliable tech-stack signal and is
+		// already in the fresh response headers. A change (nginx → cloudflare, a
+		// version bump, an added WAF/CDN fronting the origin) is a real
+		// infrastructure change worth surfacing — it was invisible before because
+		// the monitor only ever compared status/title/body/security, never the
+		// detected technology.
+		newServer := strings.TrimSpace(hdr.Get("Server"))
+		oldServer := strings.TrimSpace(svc.Server)
+		serverChanged := newServer != "" && oldServer != "" && !strings.EqualFold(newServer, oldServer)
+		if serverChanged {
+			logFn("info", "monitor", fmt.Sprintf("[TECH CHANGE] %s: Server %q → %q", svc.URL, oldServer, newServer))
+			s.recordChange(targetID, svc.URL, "tech_change",
+				"Server: "+oldServer, "Server: "+newServer, classifyChangeSeverity("tech_change"))
+			changed++
+		}
+
+		// Always update the stored baseline (norm hash + security snapshot + server).
+		storeServer := oldServer
+		if newServer != "" {
+			storeServer = newServer
+		}
 		_, _ = s.db.Exec(`
-			UPDATE http_services SET status_code=?, title=?, content_length=?, norm_hash=?, security_snapshot=?, last_seen=CURRENT_TIMESTAMP
+			UPDATE http_services SET status_code=?, title=?, content_length=?, norm_hash=?, security_snapshot=?, server=?, last_seen=CURRENT_TIMESTAMP
 			WHERE id=?
-		`, newStatus, newTitle, len(body), newNormHash, curSnap.toJSON(), svc.ID)
+		`, newStatus, newTitle, len(body), newNormHash, curSnap.toJSON(), storeServer, svc.ID)
 	}
 
 	// Monitor JS file changes
@@ -541,6 +563,8 @@ func notificationTitle(changeType string) string {
 		return "HTTP response changed"
 	case "page_change":
 		return "Monitored project page changed"
+	case "tech_change":
+		return "Technology / server changed"
 	case "new_subdomain":
 		return "New subdomain discovered"
 	case "header_regression", "security_header_removed":
