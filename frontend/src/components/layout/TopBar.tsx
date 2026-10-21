@@ -177,6 +177,7 @@ export const TopBar = () => {
     }
     if (n.target_id) navigate(`/targets/${n.target_id}`)
     else if (n.url.startsWith('/') && !n.url.startsWith('//')) navigate(n.url)
+    else if (/^https?:\/\//i.test(n.url)) window.open(n.url, '_blank', 'noopener,noreferrer')
   }
 
   return (
