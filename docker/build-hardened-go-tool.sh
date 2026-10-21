@@ -56,14 +56,24 @@ case "$binary" in
 	nuclei)
 		upgrade_if_present github.com/go-git/go-git/v5 v5.19.2
 		upgrade_if_present google.golang.org/grpc v1.83.2
+		# CVE-2026-100349/100351/100352/100353/100354: a cluster of DoS and an
+		# auth-bypass in kin-openapi request/response validation, all fixed by
+		# v0.149.0. Direct dependency of nuclei; its tagged source still compiles
+		# against this version (verified by build).
+		upgrade_if_present github.com/getkin/kin-openapi v0.149.0
 		;;
 esac
+# CVE-2026-63209: DoS via integer overflow in klauspost/compress dictionary
+# processing, fixed in v1.18.7. Pulled in by several tools (shuffledns,
+# subfinder, …) at a range of pre-fix versions; a patch-level bump within the
+# stable 1.18 API.
+upgrade_if_present github.com/klauspost/compress v1.18.7
 # Keep the coordinated Go subrepository set last. Updating one of these can
 # otherwise downgrade another through minimal-version selection.
 upgrade_if_present golang.org/x/crypto v0.55.0
 upgrade_if_present golang.org/x/text v0.41.0
 upgrade_if_present golang.org/x/mod v0.40.0
-upgrade_if_present golang.org/x/net v0.58.0
+upgrade_if_present golang.org/x/net v0.60.0
 
 mkdir -p "$output_dir"
 go build -trimpath -ldflags='-s -w' -o "${output_dir}/${binary}" "$package"

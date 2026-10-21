@@ -48,7 +48,7 @@
 # docker-compose.yml and README.md.
 # ─────────────────────────────────────────────────────────────────────────────
 
-ARG GO_VERSION=1.26.8-bookworm
+ARG GO_VERSION=1.26.10-bookworm
 ARG NODE_VERSION=24.21.0-bookworm
 ARG DEBIAN_VERSION=bookworm-slim
 ARG VERSION=dev
