@@ -7,13 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -1506,20 +1506,26 @@ func (s *SubdomainScanner) pruneRejectedSubdomains(ctx context.Context, targetID
 }
 
 // buildDNSResolver returns a *net.Resolver that dials the given DNS servers
-// (host:port) directly, picking one at random per connection to spread load and
-// survive a single provider rate-limiting a noisy enumeration. An empty list
-// falls back to the system resolver. PreferGo keeps resolution in-process so the
-// custom Dial is actually used (cgo's resolver would ignore it).
+// (host:port) directly, rotating through them round-robin per connection to
+// spread load and survive a single provider rate-limiting a noisy enumeration.
+// An empty list falls back to the system resolver. PreferGo keeps resolution
+// in-process so the custom Dial is actually used (cgo's resolver would ignore
+// it). Round-robin (an atomic counter) rather than a random pick deliberately:
+// it spreads load more evenly AND avoids a math/rand weak-RNG flag for what is
+// plain, non-security-sensitive load balancing.
 func buildDNSResolver(servers []string) *net.Resolver {
 	if len(servers) == 0 {
 		return net.DefaultResolver
 	}
+	var next atomic.Uint64
 	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			srv := servers[rand.Intn(len(servers))]
+			// idx is (counter mod len) so it is always in [0,len) — a valid, small
+			// int index; the conversion cannot overflow.
+			idx := int(next.Add(1) % uint64(len(servers))) //#nosec G115 -- modulo by len(servers) keeps the value in [0,len)
 			d := net.Dialer{Timeout: 4 * time.Second}
-			return d.DialContext(ctx, network, srv)
+			return d.DialContext(ctx, network, servers[idx])
 		},
 	}
 }
